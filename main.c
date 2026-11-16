@@ -1,16 +1,17 @@
 // PS2 Showdown - battle royale estilo "arena colorida" (top-down, 10 jogadores)
 // PS2SDK + gsKit + libpad. Personagens e nomes sao originais.
 //
-// Controles:
+// Menu: CIMA/BAIXO navega | X confirma | ESQ/DIR troca a classe | START pausa
+// Jogo:
 //   Analogico esquerdo : mover
 //   Analogico direito  : mirar (solte para atirar)
 //   R1                 : mira automatica + tiro no inimigo mais proximo
 //   QUADRADO           : super (quando a barra azul estiver cheia)
-//   SELECT             : trocar de classe e reiniciar | START: reiniciar
 #include <kernel.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <math.h>
 #include <sifrpc.h>
 #include <loadfile.h>
@@ -29,8 +30,9 @@
 #define PI 3.14159265f
 
 enum { WALL = 0, CRATE = 1, BUSH = 2 };
+enum { S_TITLE = 0, S_HELP, S_PLAY, S_PAUSE, S_OVER };
 
-typedef struct { float x, y, aim, hp, ammo, super, cd; int alive, cls, cubes, aiming; } Actor;
+typedef struct { float x, y, aim, hp, ammo, super, cd; int alive, cls, cubes, aiming, place; } Actor;
 typedef struct { float x, y, dx, dy, life, dmg; int owner, active; } Bullet;
 typedef struct { float x, y, w, h, hp; int kind; } Block;
 typedef struct { float x, y; int active; } Cube;
@@ -42,12 +44,15 @@ static const ClassDef CLS[3] = {
     { 2.1f, 14.0f, 55, 50, 0.00f,  80, 1, GS_SETREG_RGBAQ(170,  90, 255, 0x80, 0) },
     { 2.0f,  9.0f, 18, 30, 0.20f, 160, 2, GS_SETREG_RGBAQ( 60, 200, 120, 0x80, 0) },
 };
+static const char *CLS_NAME[3] = { "ESTILHACO", "FALCAO", "MURALHA" };
+static const char *CLS_DESC[3] = { "3 PROJETEIS DE CURTO ALCANCE", "1 TIRO FORTE DE LONGO ALCANCE", "MUITA VIDA E 2 PROJETEIS" };
 
 static Actor actors[N_ACTORS];            // actors[0] = jogador
 static Bullet bullets[MAX_BULLETS];
 static Block blocks[MAX_BLOCKS];
 static Cube cubes[MAX_CUBES];
 static int n_blocks, frame_count, winner, player_cls = 0;
+static int state = S_TITLE, menu_sel = 0, anim = 0, dead_timer = 0;
 static float zone_r;
 
 static char padBuf[256] __attribute__((aligned(64)));
@@ -96,21 +101,21 @@ static void drop_cube(float x, float y) {
 
 static void reset_game(void) {
     float spx[N_ACTORS], spy[N_ACTORS];
-    srand(frame_count * 7 + 4242);
+    srand(frame_count * 7 + anim + 4242);
     memset(bullets, 0, sizeof(bullets));
     memset(cubes, 0, sizeof(cubes));
     n_blocks = 0;
     for (int i = 0; i < N_ACTORS; i++) {
         float a = 2 * PI * i / N_ACTORS;
         spx[i] = WORLD / 2 + cosf(a) * 700; spy[i] = WORLD / 2 + sinf(a) * 700;
-        actors[i] = (Actor){ spx[i], spy[i], a + PI, 0, 3, 0, 0, 1, (i == 0) ? player_cls : rand() % 3, 0, 0 };
+        actors[i] = (Actor){ spx[i], spy[i], a + PI, 0, 3, 0, 0, 1, (i == 0) ? player_cls : rand() % 3, 0, 0, 0 };
         actors[i].hp = maxhp(&actors[i]);
     }
     for (int i = 0; i < 16; i++) add_block(WALL, (i & 1) ? 36 : frand(80, 160), (i & 1) ? frand(80, 160) : 36, 1, spx, spy);
     for (int i = 0; i < 22; i++) add_block(CRATE, 34, 34, 60, spx, spy);
     for (int i = 0; i < 16; i++) add_block(BUSH, frand(80, 130), frand(60, 100), 1, spx, spy);
     zone_r = WORLD * 0.78f;
-    frame_count = 0; winner = -1;
+    frame_count = 0; winner = -1; dead_timer = 0;
 }
 
 // ---------- combate ----------
@@ -154,8 +159,10 @@ static int nearest_enemy(int who, float maxd, int need_visible) {
 static void move_actor(Actor *a, float dx, float dy) {
     if (!solid_at(a->x + dx, a->y, R)) a->x += dx;
     if (!solid_at(a->x, a->y + dy, R)) a->y += dy;
-    if (a->x < R) a->x = R; if (a->x > WORLD - R) a->x = WORLD - R;
-    if (a->y < R) a->y = R; if (a->y > WORLD - R) a->y = WORLD - R;
+    if (a->x < R) a->x = R;
+    if (a->x > WORLD - R) a->x = WORLD - R;
+    if (a->y < R) a->y = R;
+    if (a->y > WORLD - R) a->y = WORLD - R;
 }
 
 static void update_bots(void) {
@@ -165,7 +172,7 @@ static void update_bots(void) {
         const ClassDef *c = &CLS[b->cls];
         float range = c->bspeed * c->life * 0.85f;
         float tx = WORLD / 2, ty = WORLD / 2;
-        int mode = 0;   // 0 = zona, 1 = cubo, 2 = inimigo, 3 = caixa
+        int stay = 0;
         int outside = dist(b->x, b->y, WORLD / 2, WORLD / 2) > zone_r * 0.85f;
         if (!outside) {
             int e = nearest_enemy(i, 420, 1);
@@ -180,10 +187,10 @@ static void update_bots(void) {
                 b->aim = atan2f(actors[e].y - b->y, actors[e].x - b->x) + frand(-0.1f, 0.1f);
                 if (d < range && frame_count % 20 == i) try_shoot(i, b->aim);
                 if (b->super >= 100 && d < 200) use_super(i);
-                tx = actors[e].x; ty = actors[e].y; mode = 2;
+                tx = actors[e].x; ty = actors[e].y;
                 if (d < range * 0.5f) { tx = b->x - (tx - b->x); ty = b->y - (ty - b->y); }  // recua
             } else if (cb >= 0) {
-                tx = cubes[cb].x; ty = cubes[cb].y; mode = 1;
+                tx = cubes[cb].x; ty = cubes[cb].y;
             } else {
                 float cd = 300; int ci = -1;
                 for (int k = 0; k < n_blocks; k++) if (blocks[k].kind == CRATE && blocks[k].hp > 0) {
@@ -191,14 +198,14 @@ static void update_bots(void) {
                     if (d < cd) { cd = d; ci = k; }
                 }
                 if (ci >= 0) {
-                    tx = blocks[ci].x + 17; ty = blocks[ci].y + 17; mode = 3;
+                    tx = blocks[ci].x + 17; ty = blocks[ci].y + 17;
                     b->aim = atan2f(ty - b->y, tx - b->x);
                     if (cd < 150 && frame_count % 20 == i) try_shoot(i, b->aim);
-                    if (cd < 60) { tx = b->x; ty = b->y; }
+                    if (cd < 60) stay = 1;
                 }
             }
         }
-        (void)mode;
+        if (stay) continue;
         float ang = atan2f(ty - b->y, tx - b->x);
         move_actor(b, cosf(ang) * c->speed * 0.55f, sinf(ang) * c->speed * 0.55f);
     }
@@ -263,7 +270,8 @@ static void update(struct padButtonStatus *pad, u32 btns, u32 prev) {
             if (j == b->owner || !actors[j].alive) continue;
             if (dist(actors[j].x, actors[j].y, b->x, b->y) < R + 3) {
                 actors[j].hp -= b->dmg;
-                actors[b->owner].super += 8; if (actors[b->owner].super > 100) actors[b->owner].super = 100;
+                actors[b->owner].super += 8;
+                if (actors[b->owner].super > 100) actors[b->owner].super = 100;
                 b->active = 0; break;
             }
         }
@@ -271,9 +279,14 @@ static void update(struct padButtonStatus *pad, u32 btns, u32 prev) {
     int alive = 0, last = -1;
     for (int i = 0; i < N_ACTORS; i++) if (actors[i].alive) { alive++; last = i; }
     if (winner < 0 && alive <= 1) winner = (alive == 1) ? last : 99;
+    if (!p->alive) {
+        if (!p->place) p->place = alive + 1;
+        dead_timer++;
+    }
+    if (winner == 0) p->place = 1;
 }
 
-// ---------- desenho ----------
+// ---------- desenho basico ----------
 static void fcircle(float cx, float cy, float r, u64 color, int z) {
     for (int i = 0; i < 12; i++) {
         float a1 = 2 * PI * i / 12, a2 = 2 * PI * (i + 1) / 12;
@@ -283,6 +296,83 @@ static void fcircle(float cx, float cy, float r, u64 color, int z) {
 }
 static void rect(float x1, float y1, float x2, float y2, u64 c, int z) { gsKit_prim_sprite(gs, x1, y1, x2, y2, z, c); }
 
+// ---------- fonte de pixels 5x7 (so maiusculas, numeros e alguns simbolos) ----------
+static const char FONT_CHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.:!-/+<>";
+static const unsigned char FONT[44][7] = {
+    {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}, // A
+    {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E}, // B
+    {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E}, // C
+    {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E}, // D
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F}, // E
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}, // F
+    {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F}, // G
+    {0x11,0x11,0x11,0x1F,0x11,0x11,0x11}, // H
+    {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E}, // I
+    {0x07,0x02,0x02,0x02,0x02,0x12,0x0C}, // J
+    {0x11,0x12,0x14,0x18,0x14,0x12,0x11}, // K
+    {0x10,0x10,0x10,0x10,0x10,0x10,0x1F}, // L
+    {0x11,0x1B,0x15,0x15,0x11,0x11,0x11}, // M
+    {0x11,0x19,0x15,0x13,0x11,0x11,0x11}, // N
+    {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}, // O
+    {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10}, // P
+    {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D}, // Q
+    {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11}, // R
+    {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E}, // S
+    {0x1F,0x04,0x04,0x04,0x04,0x04,0x04}, // T
+    {0x11,0x11,0x11,0x11,0x11,0x11,0x0E}, // U
+    {0x11,0x11,0x11,0x11,0x11,0x0A,0x04}, // V
+    {0x11,0x11,0x11,0x15,0x15,0x1B,0x11}, // W
+    {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}, // X
+    {0x11,0x11,0x0A,0x04,0x04,0x04,0x04}, // Y
+    {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}, // Z
+    {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, // 0
+    {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E}, // 1
+    {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F}, // 2
+    {0x1E,0x01,0x01,0x0E,0x01,0x01,0x1E}, // 3
+    {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, // 4
+    {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E}, // 5
+    {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, // 6
+    {0x1F,0x01,0x02,0x04,0x08,0x08,0x08}, // 7
+    {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, // 8
+    {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}, // 9
+    {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C}, // .
+    {0x00,0x0C,0x0C,0x00,0x0C,0x0C,0x00}, // :
+    {0x04,0x04,0x04,0x04,0x04,0x00,0x04}, // !
+    {0x00,0x00,0x00,0x1F,0x00,0x00,0x00}, // -
+    {0x01,0x02,0x02,0x04,0x08,0x08,0x10}, // /
+    {0x00,0x04,0x04,0x1F,0x04,0x04,0x00}, // +
+    {0x02,0x04,0x08,0x10,0x08,0x04,0x02}, // <
+    {0x08,0x04,0x02,0x01,0x02,0x04,0x08}, // >
+};
+
+static int text_w(const char *s, int sc) { return (int)strlen(s) * 6 * sc - sc; }
+
+static void draw_text(int x, int y, int sc, u64 col, int z, const char *s) {
+    for (; *s; s++, x += 6 * sc) {
+        char ch = (char)toupper((unsigned char)*s);
+        const char *f = strchr(FONT_CHARS, ch);
+        if (ch == ' ' || f == NULL) continue;
+        const unsigned char *g = FONT[f - FONT_CHARS];
+        for (int r = 0; r < 7; r++) {
+            int c = 0;
+            while (c < 5) {
+                if (g[r] & (0x10 >> c)) {
+                    int c0 = c;
+                    while (c < 5 && (g[r] & (0x10 >> c))) c++;
+                    gsKit_prim_sprite(gs, x + c0 * sc, y + r * sc, x + c * sc, y + (r + 1) * sc, z, col);
+                } else c++;
+            }
+        }
+    }
+}
+// texto com sombra
+static void text_sh(int x, int y, int sc, u64 col, const char *s) {
+    draw_text(x + sc, y + sc, sc, RGBA(10, 8, 30), 19, s);
+    draw_text(x, y, sc, col, 20, s);
+}
+static void ctext(int y, int sc, u64 col, const char *s) { text_sh((SCR_W - text_w(s, sc)) / 2, y, sc, col, s); }
+
+// ---------- jogo ----------
 static void render(void) {
     Actor *p = &actors[0];
     float camx = p->alive ? p->x : WORLD / 2, camy = p->alive ? p->y : WORLD / 2;
@@ -290,8 +380,7 @@ static void render(void) {
 
     gsKit_clear(gs, RGBA(20, 20, 40));                                         // fora do mapa
     rect(ox, oy, WORLD + ox, WORLD + oy, RGBA(225, 190, 110), 0);                // chao de areia
-    // gas: cobre tudo fora do circulo com 4 faixas aproximadas + borda
-    for (int i = 0; i < 48; i++) {
+    for (int i = 0; i < 48; i++) {                                               // gas
         float a1 = 2 * PI * i / 48, a2 = 2 * PI * (i + 1) / 48;
         float cx = WORLD / 2 + ox, cy = WORLD / 2 + oy;
         gsKit_prim_triangle(gs, cx + cosf(a1) * zone_r, cy + sinf(a1) * zone_r,
@@ -339,7 +428,7 @@ static void render(void) {
             fcircle(p->x + ox + cosf(p->aim) * s * 30, p->y + oy + sinf(p->aim) * s * 30, 2, RGBA(255, 255, 255), 13);
     }
 
-    // HUD (sem texto): vida, municao (3), super, cubos, jogadores vivos
+    // HUD: vida, municao (3), super, cubos, jogadores vivos
     float mh = maxhp(p);
     rect(18, 18, 222, 34, RGBA(20, 20, 20), 14);
     rect(20, 20, 20 + 200 * (p->hp / mh > 1 ? 1 : (p->hp < 0 ? 0 : p->hp / mh)), 32, RGBA(60, 220, 60), 15);
@@ -353,14 +442,89 @@ static void render(void) {
     for (int i = 0; i < p->cubes && i < 20; i++) rect(20 + i * 12, 70, 28 + i * 12, 78, RGBA(170, 60, 255), 15);
     int alive = 0;
     for (int i = 0; i < N_ACTORS; i++) if (actors[i].alive) { rect(SCR_W - 20 - alive * 14, 20, SCR_W - 10 - alive * 14, 30, RGBA(255, 255, 255), 15); alive++; }
-    rect(SCR_W - 70, 36, SCR_W - 70 + 12 * (player_cls + 1), 42, CLS[player_cls].color, 15);   // classe atual
-
-    if (winner >= 0) {                          // faixa: verde = venceu, vermelha = perdeu
-        u64 c = (winner == 0) ? RGBA(0, 200, 0) : RGBA(200, 0, 0);
-        rect(0, SCR_H / 2 - 20, SCR_W, SCR_H / 2 + 20, c, 16);
-    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "VIVOS %d", alive);
+    text_sh(SCR_W - 12 - text_w(buf, 2), 38, 2, RGBA(255, 255, 255), buf);
+    if (p->alive && dist(p->x, p->y, WORLD / 2, WORLD / 2) > zone_r && (anim / 20) % 2 == 0)
+        ctext(90, 3, RGBA(255, 92, 138), "FORA DA ZONA!");
+    if (!p->alive && winner < 0) ctext(90, 3, RGBA(255, 92, 138), "VOCE FOI ELIMINADO");
 }
 
+// ---------- menus ----------
+static void draw_items(int y0, int sc, const char **items, int n, int sel) {
+    for (int i = 0; i < n; i++) {
+        int y = y0 + i * (sc * 7 + 18), w = text_w(items[i], sc);
+        if (i == sel) {
+            rect((SCR_W - w) / 2 - 16, y - 7, (SCR_W + w) / 2 + 16, y + sc * 7 + 7, RGBA(255, 210, 63), 18);
+            draw_text((SCR_W - w) / 2, y, sc, RGBA(58, 26, 0), 20, items[i]);
+        } else {
+            ctext(y, sc, RGBA(255, 255, 255), items[i]);
+        }
+    }
+}
+static void nav(u32 pressed, int count) {
+    if (pressed & PAD_UP) menu_sel = (menu_sel + count - 1) % count;
+    if (pressed & PAD_DOWN) menu_sel = (menu_sel + 1) % count;
+}
+
+static void render_bg_checker(void) {
+    int off = (anim / 2) % 128;
+    for (int gx = -128; gx < SCR_W; gx += 64)
+        for (int gy = -128; gy < SCR_H; gy += 64)
+            if ((((gx + 128) / 64) + ((gy + 128) / 64)) % 2 == 0)
+                rect(gx + off, gy + off, gx + off + 64, gy + off + 64, RGBA(31, 28, 78), 1);
+}
+
+static void render_title(void) {
+    char cls_line[48];
+    gsKit_clear(gs, RGBA(22, 20, 58));
+    render_bg_checker();
+    int bob = (int)(sinf(anim * 0.06f) * 5.0f);
+    ctext(40 + bob, 7, RGBA(255, 210, 63), "SHOWDOWN");
+    ctext(104 + bob, 4, RGBA(53, 201, 245), "ARENA");
+
+    snprintf(cls_line, sizeof(cls_line), "CLASSE: < %s >", CLS_NAME[player_cls]);
+    const char *items[3] = { "JOGAR", cls_line, "COMO JOGAR" };
+    draw_items(170, 3, items, 3, menu_sel);
+
+    for (int i = 0; i < 3; i++) {                      // previa das classes
+        float cx = SCR_W / 2 + (i - 1) * 100, cy = 340;
+        int sel = (i == player_cls);
+        fcircle(cx, cy, sel ? 26 : 18, sel ? RGBA(255, 255, 255) : RGBA(10, 8, 30), 17);
+        fcircle(cx, cy, sel ? 22 : 15, CLS[i].color, 18);
+        fcircle(cx + 5, cy - 3, sel ? 5 : 3, RGBA(255, 255, 255), 19);
+    }
+    ctext(382, 2, RGBA(185, 180, 230), CLS_DESC[player_cls]);
+    ctext(420, 2, RGBA(185, 180, 230), "CIMA BAIXO: NAVEGAR   X: ESCOLHER");
+}
+
+static void render_help(void) {
+    static const char *lines[] = {
+        "ANALOGICO ESQ: MOVER",
+        "ANALOGICO DIR: MIRAR E SOLTAR PARA ATIRAR",
+        "R1: MIRA AUTOMATICA NO MAIS PROXIMO",
+        "QUADRADO: SUPER QUANDO A BARRA ESTIVER CHEIA",
+        "START: PAUSA",
+        "QUEBRE CAIXAS PARA PEGAR CUBOS DE PODER",
+        "ARBUSTOS ESCONDEM VOCE",
+        "FUJA DO GAS VERDE E SEJA O ULTIMO DE PE",
+    };
+    gsKit_clear(gs, RGBA(22, 20, 58));
+    render_bg_checker();
+    ctext(30, 5, RGBA(255, 210, 63), "COMO JOGAR");
+    for (int i = 0; i < 8; i++) text_sh(50, 110 + i * 29, 2, RGBA(255, 255, 255), lines[i]);
+    ctext(410, 2, RGBA(185, 180, 230), "X: VOLTAR");
+}
+
+static void draw_overlay(const char *title, const char *sub, const char **items, int n) {
+    rect(106, 106, 534, 334, RGBA(255, 210, 63), 16);
+    rect(110, 110, 530, 330, RGBA(30, 27, 76), 17);
+    ctext(124, 4, RGBA(255, 210, 63), title);
+    if (sub) ctext(166, 2, RGBA(185, 180, 230), sub);
+    draw_items(200, 3, items, n, menu_sel);
+}
+
+// ---------- entrada e inicializacao ----------
 static void init_pad(void) {
     SifInitRpc(0);
     SifLoadModule("rom0:SIO2MAN", 0, NULL);
@@ -389,11 +553,70 @@ int main(void) {
         u32 btns = 0;
         if (padGetState(0, 0) == PAD_STATE_STABLE && padRead(0, 0, &pad) != 0)
             btns = 0xffff ^ pad.btns;
-        if ((btns & PAD_SELECT) && !(prev & PAD_SELECT)) { player_cls = (player_cls + 1) % 3; reset_game(); }
-        if ((btns & PAD_START) && !(prev & PAD_START)) reset_game();
-        update(&pad, btns, prev);
+        u32 pressed = btns & ~prev;
+        anim++;
+
+        switch (state) {
+        case S_TITLE:
+            nav(pressed, 3);
+            if (menu_sel == 1) {
+                if (pressed & PAD_LEFT) player_cls = (player_cls + 2) % 3;
+                if (pressed & (PAD_RIGHT | PAD_CROSS)) player_cls = (player_cls + 1) % 3;
+            } else if (pressed & PAD_CROSS) {
+                if (menu_sel == 0) { reset_game(); state = S_PLAY; }
+                else if (menu_sel == 2) state = S_HELP;
+            }
+            if (pressed & PAD_START) { reset_game(); state = S_PLAY; }
+            render_title();
+            break;
+
+        case S_HELP:
+            if (pressed & (PAD_CROSS | PAD_CIRCLE | PAD_START)) state = S_TITLE;
+            render_help();
+            break;
+
+        case S_PLAY:
+            if (pressed & PAD_START) { state = S_PAUSE; menu_sel = 0; }
+            else {
+                update(&pad, btns, prev);
+                if (winner >= 0 || dead_timer > 120) { state = S_OVER; menu_sel = 0; }
+            }
+            render();
+            break;
+
+        case S_PAUSE: {
+            const char *items[3] = { "CONTINUAR", "REINICIAR", "MENU PRINCIPAL" };
+            nav(pressed, 3);
+            if (pressed & PAD_START) state = S_PLAY;
+            else if (pressed & PAD_CROSS) {
+                if (menu_sel == 0) state = S_PLAY;
+                else if (menu_sel == 1) { reset_game(); state = S_PLAY; }
+                else { state = S_TITLE; menu_sel = 0; }
+            }
+            render();
+            if (state == S_PAUSE) draw_overlay("PAUSA", CLS_NAME[player_cls], items, 3);
+            break;
+        }
+
+        case S_OVER: {
+            char sub[40];
+            const char *items[2] = { "JOGAR DE NOVO", "MENU PRINCIPAL" };
+            nav(pressed, 2);
+            if (pressed & PAD_CROSS) {
+                if (menu_sel == 0) { reset_game(); state = S_PLAY; }
+                else { state = S_TITLE; menu_sel = 0; }
+            }
+            render();
+            if (state == S_OVER) {
+                if (winner == 0) snprintf(sub, sizeof(sub), "VOCE E O ULTIMO DE PE");
+                else snprintf(sub, sizeof(sub), "POSICAO: %d/%d", actors[0].place ? actors[0].place : N_ACTORS, N_ACTORS);
+                draw_overlay(winner == 0 ? "VITORIA!" : "FIM DE JOGO", sub, items, 2);
+            }
+            break;
+        }
+        }
+
         prev = btns;
-        render();
         gsKit_queue_exec(gs);
         gsKit_sync_flip(gs);
     }
