@@ -1,0 +1,20 @@
+name: Compilar ELF do PS2
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: ps2dev/ps2dev:latest
+    steps:
+      - name: Dependencias
+        run: apk add --no-cache git make build-base
+      - uses: actions/checkout@v4
+      - name: Compilar
+        run: make
+      - uses: actions/upload-artifact@v4
+        with:
+          name: battle_royale-elf
+          path: battle_royale.elf
