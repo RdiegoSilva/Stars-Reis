@@ -5,7 +5,6 @@
 // Jogo:
 //   Analogico esquerdo : mover (com inercia)
 //   Analogico direito  : mirar (solte para atirar)
-//   R1                 : mira automatica + tiro no inimigo mais proximo
 //   QUADRADO           : super (cada classe tem o seu)
 #include <kernel.h>
 #include <stdio.h>
@@ -48,6 +47,7 @@ typedef struct { float x, y; int active; } Cube;
 typedef struct { float x, y, vx, vy, life, max, size; u64 color; int active; } Particle;
 typedef struct { float x, y, vy, life; int val; u64 color; int active; } DmgNum;
 typedef struct { float x, y; int type; } Decor;
+typedef struct { char a[8], b[8]; int ca, cb, gas, ttl; } Feed;
 
 // classes: 0 = Estilhaco (shotgun), 1 = Falcao (sniper), 2 = Muralha (tanque)
 typedef struct {
@@ -71,8 +71,7 @@ static Particle parts[MAX_PART];
 static DmgNum dmgs[MAX_DMG];
 static Decor decor[N_DECOR];
 static float patch_x[N_PATCH], patch_y[N_PATCH], patch_rx[N_PATCH], patch_ry[N_PATCH];
-static char feed_txt[MAX_FEED][40];
-static int feed_ttl[MAX_FEED];
+static Feed feed[MAX_FEED];
 static char names[N_ACTORS][8];
 static float spx[N_ACTORS], spy[N_ACTORS];
 static int n_blocks, frame_count, winner, player_cls = 0;
@@ -120,10 +119,15 @@ static void add_dmgnum(float x, float y, int val, u64 color) {
         return;
     }
 }
-static void push_feed(const char *a, const char *sep, const char *b) {
-    for (int i = MAX_FEED - 1; i > 0; i--) { memcpy(feed_txt[i], feed_txt[i - 1], 40); feed_ttl[i] = feed_ttl[i - 1]; }
-    snprintf(feed_txt[0], 40, "%s%s%s", a, sep, b);
-    feed_ttl[0] = 300;
+static void push_feed(int killer, int victim) {
+    for (int i = MAX_FEED - 1; i > 0; i--) feed[i] = feed[i - 1];
+    Feed *f = &feed[0];
+    memset(f, 0, sizeof(*f));
+    snprintf(f->b, sizeof(f->b), "%s", names[victim]);
+    f->cb = actors[victim].cls;
+    f->gas = (killer < 0 || killer == victim);
+    if (!f->gas) { snprintf(f->a, sizeof(f->a), "%s", names[killer]); f->ca = actors[killer].cls; }
+    f->ttl = 360;
 }
 
 // ---------- mapa ----------
@@ -228,7 +232,7 @@ static void reset_game(void) {
     memset(cubes, 0, sizeof(cubes));
     memset(parts, 0, sizeof(parts));
     memset(dmgs, 0, sizeof(dmgs));
-    memset(feed_ttl, 0, sizeof(feed_ttl));
+    memset(feed, 0, sizeof(feed));
     memset(actors, 0, sizeof(actors));
     for (int i = 0; i < N_ACTORS; i++) {
         float a = 2 * PI * i / N_ACTORS;
@@ -259,8 +263,8 @@ static void kill_actor(int who, int killer) {
     for (int k = 0; k <= a->cubes / 2; k++) drop_cube(a->x + frand(-22, 22), a->y + frand(-22, 22));
     if (killer >= 0 && killer != who) {
         actors[killer].kills++;
-        push_feed(names[killer], " > ", names[who]);
-    } else push_feed(names[who], " - GAS", "");
+        push_feed(killer, who);
+    } else push_feed(-1, who);
     if (who == 0) shake = shake > 8 ? shake : 8;
 }
 static void hurt(int who, float dmg, int src, float dirx, float diry) {
@@ -455,11 +459,6 @@ static void update(struct padButtonStatus *pad, u32 btns, u32 prev) {
         accel_move(p, lx, ly, c->speed * (p->aiming ? 0.75f : 1.0f));
         if (fabsf(rx) > 0.35f || fabsf(ry) > 0.35f) { p->aim = atan2f(ry, rx); p->aiming = 1; }
         else if (p->aiming) { try_shoot(0, p->aim); p->aiming = 0; }   // solta = atira
-        if ((btns & PAD_R1) && !(prev & PAD_R1)) {
-            int e = nearest_enemy(0, c->bspeed * c->life, 1);
-            if (e >= 0) try_shoot(0, atan2f(actors[e].y - p->y, actors[e].x - p->x));
-            else try_shoot(0, p->aim);
-        }
         if ((btns & PAD_SQUARE) && !(prev & PAD_SQUARE)) use_super(0);
     }
     update_bots();
@@ -533,7 +532,7 @@ static void update(struct padButtonStatus *pad, u32 btns, u32 prev) {
         dmgs[i].y += dmgs[i].vy; dmgs[i].vy *= 0.94f;
         if (--dmgs[i].life <= 0) dmgs[i].active = 0;
     }
-    for (int i = 0; i < MAX_FEED; i++) if (feed_ttl[i] > 0) feed_ttl[i]--;
+    for (int i = 0; i < MAX_FEED; i++) if (feed[i].ttl > 0) feed[i].ttl--;
     shake *= 0.85f; if (shake < 0.2f) shake = 0;
 
     int alive = 0, last = -1;
@@ -651,6 +650,112 @@ static void bar(int x, int y, int w, int h, float f, u64 fill, u64 hi, int z) {
     }
 }
 
+// ---------- personagens humanos ----------
+static const int SKIN_C[3][3] = { { 255, 206, 160 }, { 242, 192, 152 }, { 196, 140, 98 } };
+static const int HAIR_C[3][3] = { { 214, 74, 30 }, { 76, 44, 130 }, { 44, 32, 26 } };
+
+static int visible_to(const Actor *a, int i, const Actor *p) {
+    return !(i != 0 && in_bush(a->x, a->y) && dist(a->x, a->y, p->x, p->y) > 90);
+}
+
+static void draw_human(float sx, float sy, int cls, float face, float aim, float walk,
+                       int moving, int flash, float recoil, int me) {
+    u64 skin = RGBA(SKIN_C[cls][0], SKIN_C[cls][1], SKIN_C[cls][2]);
+    u64 hair = RGBA(HAIR_C[cls][0], HAIR_C[cls][1], HAIR_C[cls][2]);
+    u64 body = flash ? RGBA(255, 255, 255) : ccol(cls, 0);
+    u64 dark = ccol(cls, -70);
+    u64 ink = RGBA(20, 18, 44);
+    u64 white = RGBA(255, 255, 255);
+    float sw = moving ? sinf(walk) * 3.5f : 0;
+    float by = sy - (moving ? fabsf(sinf(walk)) * 1.5f : 0);
+
+    if (me) fellipse(sx, sy + 16, 17, 7, RGBA(53, 201, 245), 13);          // anel do jogador
+    fellipse(sx, sy + 16, 13, 5, RGBA(150, 118, 70), 14);                   // sombra
+
+    // pernas
+    float l1 = sy + 13 + sw, l2 = sy + 13 - sw;
+    rect(sx - 7, by + 4, sx - 1, l1, RGBA(46, 50, 92), 15);
+    rect(sx + 1, by + 4, sx + 7, l2, RGBA(46, 50, 92), 15);
+    rect(sx - 8, l1 - 2, sx - 1, l1 + 2, ink, 15);
+    rect(sx + 1, l2 - 2, sx + 8, l2 + 2, ink, 15);
+
+    // tronco
+    rect(sx - 9, by - 8, sx + 9, by + 8, ink, 16);
+    rect(sx - 8, by - 7, sx + 8, by + 7, body, 17);
+    rect(sx - 8, by + 3, sx + 8, by + 7, dark, 18);
+    rect(sx - 6, by - 6, sx - 2, by - 3, ccol(cls, 60), 18);
+
+    // braco que segura a arma (aponta para a mira) e braco solto
+    float sh = cosf(aim) >= 0 ? 1.0f : -1.0f;
+    float shx = sx + sh * 8, shy = by - 3;
+    float hx = sx + cosf(aim) * 11, hy = by - 1 + sinf(aim) * 9;
+    int gz = sinf(aim) > -0.3f ? 22 : 15;
+    for (int t = 0; t <= 2; t++) fcircle(shx + (hx - shx) * t / 2.0f, shy + (hy - shy) * t / 2.0f, 3.4f, body, gz);
+    fcircle(hx, hy, 3.0f, skin, gz);
+    for (int d = 5; d <= 17; d += 4) {
+        float g = d - recoil * 0.5f;
+        fcircle(hx + cosf(aim) * g, hy + sinf(aim) * g, d == 17 ? 2.0f : 2.6f, d == 17 ? RGBA(120, 122, 140) : RGBA(60, 62, 78), gz);
+    }
+    fcircle(sx - sh * 9, by + 1, 3.4f, body, 18);
+    fcircle(sx - sh * 9.5f, by + 6, 3.0f, skin, 18);
+
+    // cabeca
+    float hy2 = by - 14;
+    int back = sinf(face) < -0.5f;
+    u64 cap = cls == 2 ? ccol(2, -30) : hair;
+    if (cls == 1) fcircle(sx - cosf(face) * 8, hy2 + 3, 3.8f, hair, 18);     // rabo de cavalo
+    fcircle(sx, hy2 + 0.5f, 7.8f, ink, 19);
+    if (back) {
+        fcircle(sx, hy2 + 0.5f, 6.8f, cap, 21);
+    } else {
+        fcircle(sx, hy2 + 1, 6.8f, skin, 20);
+        float ex = cosf(face) * 2.5f;
+        for (int k = -1; k <= 1; k += 2) {
+            fcircle(sx + k * 2.6f + ex, hy2 + 2.5f, 2.1f, white, 21);
+            fcircle(sx + k * 2.6f + ex + cosf(face) * 0.8f, hy2 + 2.7f, 1.1f, ink, 22);
+        }
+        if (cls == 2) fcircle(sx, hy2 - 5.2f, 6.4f, cap, 21);
+        else fcircle(sx, hy2 - 4.5f, 4.6f, hair, 21);
+    }
+    if (cls == 0) {                                                          // cabelo espetado
+        gsKit_prim_triangle(gs, sx - 7, hy2 - 4, sx - 4, hy2 - 14, sx - 1, hy2 - 6, 21, hair);
+        gsKit_prim_triangle(gs, sx - 3, hy2 - 6, sx, hy2 - 16, sx + 3, hy2 - 6, 21, hair);
+        gsKit_prim_triangle(gs, sx + 1, hy2 - 6, sx + 4, hy2 - 14, sx + 7, hy2 - 4, 21, hair);
+    } else if (cls == 1) {
+        rect(sx - 6.8f, hy2 - 3, sx + 6.8f, hy2 - 1, body, 21);               // faixa
+    } else {
+        rect(sx - 7, hy2 - 1, sx + 7, hy2 + 0.5f, ccol(2, 70), 21);           // aba do capacete
+    }
+}
+
+// vida, municao, nome e cubos ficam em cima do personagem
+static void draw_overhead(const Actor *a, int idx, float sx, float sy) {
+    int old = tz; tz = 36;
+    char buf[16];
+    const int w = 46;
+    float top = sy - 34, x0 = sx - w / 2;
+    float f = clampf(a->hp / maxhp(a), 0, 1);
+    u64 fill = idx == 0 ? RGBA(70, 226, 100) : RGBA(255, 74, 90);
+    u64 hi = idx == 0 ? RGBA(160, 255, 170) : RGBA(255, 150, 150);
+    bar((int)x0, (int)top - 18, w, 9, f, fill, hi, 31);
+    snprintf(buf, sizeof(buf), "%d", (int)(a->hp > 0 ? a->hp + 0.5f : 0));
+    text_sh((int)(sx - text_w(buf, 1) / 2.0f), (int)top - 17, 1, RGBA(255, 255, 255), buf);
+    for (int k = 0; k < 3; k++) {                                            // 3 segmentos de municao
+        float fa = clampf(a->ammo - k, 0, 1);
+        float x = x0 + k * 16;
+        rect(x - 1, top - 7, x + 15, top - 1, RGBA(10, 8, 30), 31);
+        rect(x, top - 6, x + 14, top - 2, RGBA(52, 48, 110), 32);
+        if (fa > 0) rect(x, top - 6, x + 14 * fa, top - 2, RGBA(255, 170, 40), 33);
+    }
+    text_sh((int)(sx - text_w(names[idx], 1) / 2.0f), (int)top - 29, 1, idx == 0 ? RGBA(130, 255, 160) : RGBA(255, 130, 140), names[idx]);
+    snprintf(buf, sizeof(buf), "%d", a->cubes);
+    float xs = sx - (9 + text_w(buf, 1)) / 2.0f;
+    rect(xs, top - 39, xs + 8, top - 31, RGBA(60, 16, 104), 31);
+    rect(xs + 1, top - 38, xs + 7, top - 32, RGBA(178, 78, 255), 32);
+    text_sh((int)xs + 11, (int)top - 39, 1, RGBA(255, 255, 255), buf);
+    tz = old;
+}
+
 static void render_world(float ox, float oy, const Actor *p) {
     // chao
     for (int gx = 0; gx < (int)WORLD; gx += 100)
@@ -743,33 +848,10 @@ static void render_world(float ox, float oy, const Actor *p) {
     // personagens
     for (int i = 0; i < N_ACTORS; i++) {
         const Actor *a = &actors[i];
-        if (!a->alive) continue;
-        if (i != 0 && in_bush(a->x, a->y) && dist(a->x, a->y, p->x, p->y) > 90) continue;
-        float sx = a->x + ox, sy = a->y + oy;
+        if (!a->alive || !visible_to(a, i, p)) continue;
         float spd = sqrtf(a->vx * a->vx + a->vy * a->vy);
-        float bob = sinf(frame_count * 0.35f + i) * (spd > 0.6f ? 1.5f : 0.4f);
-        sy += bob;
-        fellipse(sx, sy + 12 - bob, 13, 5, RGBA(150, 118, 70), 14);
-        float gl = 13 - a->recoil;
-        fcircle(sx + cosf(a->aim) * gl, sy + sinf(a->aim) * gl, 4, RGBA(50, 52, 64), 15);
-        fcircle(sx + cosf(a->aim) * (gl - 5), sy + sinf(a->aim) * (gl - 5), 4.5f, RGBA(80, 82, 96), 15);
-        fcircle(sx, sy, R + 2, i == 0 ? RGBA(255, 255, 255) : RGBA(20, 18, 44), 16);
-        if (i == 0) fcircle(sx, sy, R + 2, RGBA(255, 255, 255), 16);
-        fcircle(sx, sy, R, a->flash > 0 ? RGBA(255, 255, 255) : ccol(a->cls, 0), 17);
-        fcircle(sx - 3, sy - 4, 5, ccol(a->cls, 60), 18);
-        float ca = cosf(a->face), sa = sinf(a->face);
-        for (int s = -1; s <= 1; s += 2) {
-            float ex = sx + ca * 4 - sa * 4 * s, ey = sy + sa * 4 + ca * 4 * s;
-            fcircle(ex, ey, 3.6f, RGBA(255, 255, 255), 19);
-            fcircle(ex + ca * 1.4f, ey + sa * 1.4f, 1.8f, RGBA(20, 18, 44), 20);
-        }
-        float f = clampf(a->hp / maxhp(a), 0, 1);
-        rect(sx - 18, sy - 29, sx + 18, sy - 22, RGBA(10, 8, 30), 21);
-        rect(sx - 16, sy - 27, sx - 16 + 32 * f, sy - 24, i == 0 ? RGBA(70, 226, 100) : RGBA(255, 74, 90), 22);
-        if (i == 0) {                                                     // seta acima do jogador
-            float by = sy - 40 + sinf(frame_count * 0.12f) * 2;
-            gsKit_prim_triangle(gs, sx - 6, by - 6, sx + 6, by - 6, sx, by + 2, 22, RGBA(53, 201, 245));
-        }
+        draw_human(a->x + ox, a->y + oy, a->cls, a->face, a->aim, frame_count * 0.45f + i * 1.7f,
+                   spd > 0.6f, a->flash > 0, a->recoil, i == 0);
     }
     // arbustos por cima
     for (int i = 0; i < n_blocks; i++) {
@@ -787,6 +869,10 @@ static void render_world(float ox, float oy, const Actor *p) {
         }
     }
     if (p->alive && in_bush(p->x, p->y)) fcircle(p->x + ox, p->y + oy, 6, RGBA(53, 201, 245), 27);
+    for (int i = 0; i < N_ACTORS; i++) {
+        const Actor *a = &actors[i];
+        if (a->alive && visible_to(a, i, p)) draw_overhead(a, i, a->x + ox, a->y + oy);
+    }
     // particulas
     for (int i = 0; i < MAX_PART; i++) if (parts[i].active) {
         const Particle *q = &parts[i];
@@ -806,11 +892,30 @@ static void render_world(float ox, float oy, const Actor *p) {
     }
 }
 
+static void draw_skull(float cx, float cy, float r, u64 col, int z) {
+    fcircle(cx, cy, r, col, z);
+    rect(cx - r * 0.5f, cy + r * 0.4f, cx + r * 0.5f, cy + r * 1.2f, col, z);
+    fcircle(cx - r * 0.4f, cy, r * 0.28f, RGBA(30, 20, 60), z + 1);
+    fcircle(cx + r * 0.4f, cy, r * 0.28f, RGBA(30, 20, 60), z + 1);
+}
+
+static void draw_portrait(float x, float y, float sz, int cls, u64 border) {
+    u64 skin = RGBA(SKIN_C[cls][0], SKIN_C[cls][1], SKIN_C[cls][2]);
+    u64 hair = RGBA(HAIR_C[cls][0], HAIR_C[cls][1], HAIR_C[cls][2]);
+    float cx = x + sz / 2, cy = y + sz / 2;
+    rect(x - 2, y - 2, x + sz + 2, y + sz + 2, border, 39);
+    rect(x, y, x + sz, y + sz, ccol(cls, -60), 40);
+    rect(x + sz * 0.12f, y + sz * 0.74f, x + sz * 0.88f, y + sz, ccol(cls, 0), 41);
+    fcircle(cx, cy - 1, sz * 0.31f, cls == 2 ? ccol(2, -30) : hair, 42);
+    fcircle(cx, cy + sz * 0.05f, sz * 0.25f, skin, 43);
+    fcircle(cx, cy - sz * 0.17f, sz * 0.17f, cls == 2 ? ccol(2, -30) : hair, 44);
+    fcircle(cx - sz * 0.09f, cy + sz * 0.08f, sz * 0.05f, RGBA(20, 18, 44), 45);
+    fcircle(cx + sz * 0.09f, cy + sz * 0.08f, sz * 0.05f, RGBA(20, 18, 44), 45);
+}
+
 static void render_hud(const Actor *p) {
     char buf[48];
-    tz = 28;                                                              // numeros de dano no mundo
-    // (desenhados com coordenadas de tela calculadas em render())
-    tz = 38;
+    tz = 49;
 
     // vinheta: vida baixa (vermelho) ou fora da zona (verde)
     int low = p->alive && p->hp < maxhp(p) * 0.35f;
@@ -825,75 +930,54 @@ static void render_hud(const Actor *p) {
         rect(0, 0, 5, SCR_H, c, 30); rect(SCR_W - 5, 0, SCR_W, SCR_H, c, 30);
     }
 
-    // cartao do jogador
-    rect(14, 14, 276, 102, RGBA(10, 8, 30), 31);
-    rect(16, 16, 274, 100, RGBA(36, 32, 88), 32);
-    fcircle(52, 58, 25, RGBA(255, 255, 255), 33);
-    fcircle(52, 58, 22, ccol(p->cls, 0), 34);
-    fcircle(49, 53, 8, ccol(p->cls, 60), 35);
-    fcircle(45, 56, 3.5f, RGBA(255, 255, 255), 36); fcircle(59, 56, 3.5f, RGBA(255, 255, 255), 36);
-    fcircle(46, 57, 1.8f, RGBA(20, 18, 44), 37); fcircle(60, 57, 1.8f, RGBA(20, 18, 44), 37);
-    float hf = clampf(p->hp / maxhp(p), 0, 1);
-    u64 hc = hf > 0.5f ? RGBA(60, 215, 90) : (hf > 0.25f ? RGBA(255, 200, 40) : RGBA(240, 60, 70));
-    u64 hh = hf > 0.5f ? RGBA(150, 255, 160) : (hf > 0.25f ? RGBA(255, 235, 130) : RGBA(255, 140, 140));
-    bar(88, 24, 176, 20, hf, hc, hh, 33);
-    snprintf(buf, sizeof(buf), "%d/%d", (int)(p->hp > 0 ? p->hp + 0.5f : 0), (int)(maxhp(p) + 0.5f));
-    text_sh(94, 27, 2, RGBA(255, 255, 255), buf);
-    for (int i = 0; i < 3; i++) {
-        float f = clampf(p->ammo - i, 0, 1);
-        bar(88 + i * 60, 52, 54, 10, f, RGBA(255, 160, 40), RGBA(255, 214, 130), 33);
-    }
-    int ready = p->super >= 100;
-    bar(88, 72, 176, 16, p->super / 100.0f, ready && (anim / 10) % 2 ? RGBA(255, 232, 80) : (ready ? RGBA(255, 190, 40) : RGBA(60, 170, 250)),
-        ready ? RGBA(255, 250, 190) : RGBA(150, 215, 255), 33);
-    if (ready) text_sh(120, 73, 2, RGBA(58, 26, 0), "SUPER!");
-    // cubos
-    rect(14, 108, 128, 134, RGBA(10, 8, 30), 31);
-    rect(16, 110, 126, 132, RGBA(36, 32, 88), 32);
-    rect(22, 114, 38, 130, RGBA(60, 16, 104), 33);
-    rect(24, 116, 36, 128, RGBA(178, 78, 255), 34);
-    snprintf(buf, sizeof(buf), "%d +%d%%", p->cubes, p->cubes * 10);
-    text_sh(44, 114, 2, RGBA(255, 255, 255), buf);
-
-    // vivos
+    // jogadores restantes
     int alive = 0;
     for (int i = 0; i < N_ACTORS; i++) if (actors[i].alive) alive++;
-    rect(SCR_W - 146, 14, SCR_W - 14, 50, RGBA(10, 8, 30), 31);
-    rect(SCR_W - 144, 16, SCR_W - 16, 48, RGBA(36, 32, 88), 32);
-    snprintf(buf, sizeof(buf), "VIVOS %d", alive);
-    text_sh(SCR_W - 80 - text_w(buf, 2) / 2, 25, 2, RGBA(255, 255, 255), buf);
+    snprintf(buf, sizeof(buf), "RESTAM: %d", alive);
+    text_sh(16, 12, 3, RGBA(255, 255, 255), buf);
 
-    // minimapa
-    const int mx = SCR_W - 146, my = 56, ms = 128;
-    float sc = (ms - 8) / WORLD;
-    rect(mx, my, mx + ms, my + ms, RGBA(10, 8, 30), 31);
-    rect(mx + 2, my + 2, mx + ms - 2, my + ms - 2, RGBA(206, 172, 104), 32);
-    float ox0 = mx + 4, oy0 = my + 4;
-    for (int i = 0; i < n_blocks; i++) {
-        const Block *b = &blocks[i];
-        u64 col = b->kind == WATER ? RGBA(44, 138, 224) : (b->kind == BUSH ? RGBA(60, 170, 90) : (b->kind == ROCK ? RGBA(110, 112, 124) : (b->kind == CRATE ? RGBA(230, 150, 40) : RGBA(128, 84, 56))));
-        if (b->kind == CRATE && b->hp <= 0) continue;
-        float w = b->w * sc, h = b->h * sc;
-        rect(ox0 + b->x * sc, oy0 + b->y * sc, ox0 + b->x * sc + (w < 2 ? 2 : w), oy0 + b->y * sc + (h < 2 ? 2 : h), col, 33);
+    // quem matou quem (canto superior esquerdo)
+    int row = 0;
+    for (int i = 0; i < MAX_FEED && row < 3; i++) {
+        const Feed *f = &feed[i];
+        if (f->ttl <= 0) continue;
+        int y = 48 + row * 56; row++;
+        rect(10, y, 176, y + 52, RGBA(10, 8, 30), 38);
+        rect(12, y + 2, 174, y + 50, RGBA(24, 72, 190), 39);
+        rect(12, y + 2, 54, y + 50, RGBA(44, 118, 238), 40);
+        draw_skull(33, y + 26, 11, RGBA(255, 255, 255), 41);
+        if (f->gas) {
+            fcircle(74, y + 22, 9, RGBA(90, 200, 100), 41);
+            fcircle(86, y + 26, 8, RGBA(120, 225, 130), 41);
+            fcircle(68, y + 28, 7, RGBA(70, 175, 90), 42);
+            text_sh(64, y + 39, 1, RGBA(170, 255, 180), "GAS");
+        } else {
+            draw_portrait(62, y + 6, 32, f->ca, RGBA(90, 160, 255));
+            text_sh(62, y + 39, 1, RGBA(255, 255, 255), f->a);
+            rect(100, y + 14, 118, y + 20, RGBA(200, 200, 215), 41);             // revolver
+            rect(100, y + 20, 106, y + 30, RGBA(150, 100, 60), 41);
+            rect(116, y + 12, 120, y + 16, RGBA(120, 122, 140), 42);
+        }
+        draw_portrait(128, y + 6, 32, f->cb, RGBA(230, 50, 70));
+        draw_skull(160, y + 6, 6, RGBA(255, 255, 255), 46);
+        text_sh(128, y + 39, 1, RGBA(255, 255, 255), f->b);
     }
-    for (int i = 0; i < 40; i++) {
-        float a1 = 2 * PI * i / 40, a2 = 2 * PI * (i + 1) / 40;
-        float cx = ox0 + WORLD / 2 * sc, cy = oy0 + WORLD / 2 * sc, zr = zone_r * sc;
-        float x1 = clampf(cx + cosf(a1) * zr, mx + 2, mx + ms - 2), y1 = clampf(cy + sinf(a1) * zr, my + 2, my + ms - 2);
-        float x2 = clampf(cx + cosf(a2) * zr, mx + 2, mx + ms - 2), y2 = clampf(cy + sinf(a2) * zr, my + 2, my + ms - 2);
-        gsKit_prim_line(gs, x1, y1, x2, y2, 36, RGBA(255, 255, 255));
+
+    // botao do super (canto inferior direito)
+    if (p->alive) {
+        int ready = p->super >= 100;
+        float bx = SCR_W - 62, by = SCR_H - 66;
+        fcircle(bx, by, 31, RGBA(10, 8, 30), 38);
+        if (ready) {
+            fcircle(bx, by, 28, (anim / 10) % 2 ? RGBA(255, 232, 80) : RGBA(255, 190, 40), 39);
+            draw_skull(bx, by - 2, 12, RGBA(255, 255, 255), 40);
+        } else {
+            fcircle(bx, by, 28, RGBA(40, 60, 140), 39);
+            snprintf(buf, sizeof(buf), "%d%%", (int)p->super);
+            text_sh((int)(bx - text_w(buf, 2) / 2.0f), (int)by - 7, 2, RGBA(200, 225, 255), buf);
+        }
+        text_sh((int)(bx - text_w("QUADRADO", 1) / 2.0f), SCR_H - 30, 1, RGBA(255, 255, 255), "QUADRADO");
     }
-    for (int k = 0; k < MAX_CUBES; k++) if (cubes[k].active)
-        rect(ox0 + cubes[k].x * sc - 1, oy0 + cubes[k].y * sc - 1, ox0 + cubes[k].x * sc + 2, oy0 + cubes[k].y * sc + 2, RGBA(178, 78, 255), 34);
-    for (int i = 1; i < N_ACTORS; i++) {                                  // radar: inimigos proximos
-        const Actor *a = &actors[i];
-        if (!a->alive || dist(a->x, a->y, p->x, p->y) > 380) continue;
-        rect(ox0 + a->x * sc - 2, oy0 + a->y * sc - 2, ox0 + a->x * sc + 2, oy0 + a->y * sc + 2, RGBA(255, 60, 80), 35);
-    }
-    if (p->alive && (anim / 15) % 2 == 0)
-        rect(ox0 + p->x * sc - 3, oy0 + p->y * sc - 3, ox0 + p->x * sc + 3, oy0 + p->y * sc + 3, RGBA(255, 255, 255), 37);
-    else if (p->alive)
-        rect(ox0 + p->x * sc - 3, oy0 + p->y * sc - 3, ox0 + p->x * sc + 3, oy0 + p->y * sc + 3, RGBA(53, 201, 245), 37);
 
     // avisos da zona
     if (frame_count < 600) { snprintf(buf, sizeof(buf), "ZONA FECHA EM %d", (600 - frame_count) / 60 + 1); if (frame_count > 300) ctext(22, 2, RGBA(255, 255, 255), buf); }
@@ -904,14 +988,7 @@ static void render_hud(const Actor *p) {
     }
     if (ingas && (anim / 20) % 2 == 0) ctext(70, 3, RGBA(255, 92, 138), "FORA DA ZONA!");
     if (!p->alive && winner < 0) ctext(70, 3, RGBA(255, 92, 138), "VOCE FOI ELIMINADO");
-    if (p->alive && frame_count < 480) ctext(396, 2, RGBA(255, 232, 120), "R1: MIRA AUTOMATICA   QUADRADO: SUPER");
-
-    // kill feed
-    for (int i = 0; i < MAX_FEED; i++) {
-        if (feed_ttl[i] <= 0) continue;
-        int v = feed_ttl[i] > 60 ? 255 : 90 + feed_ttl[i] * 2;
-        text_sh(24, SCR_H - 44 - i * 18, 2, RGBA(v, v, v), feed_txt[i]);
-    }
+    if (p->alive && frame_count < 480) ctext(396, 2, RGBA(255, 232, 120), "ANALOGICO DIR: MIRE E SOLTE   QUADRADO: SUPER");
     tz = 60;
 }
 
@@ -923,7 +1000,7 @@ static void render(void) {
 
     gsKit_clear(gs, RGBA(20, 20, 40));
     render_world(ox, oy, p);
-    tz = 28;                                                              // numeros de dano flutuantes
+    tz = 37;                                                              // numeros de dano flutuantes
     for (int i = 0; i < MAX_DMG; i++) if (dmgs[i].active) {
         char b[12];
         snprintf(b, sizeof(b), "%d", dmgs[i].val);
@@ -985,12 +1062,12 @@ static void render_help(void) {
     static const char *lines[] = {
         "ANALOGICO ESQ: MOVER (COM INERCIA)",
         "ANALOGICO DIR: MIRAR E SOLTAR PARA ATIRAR",
-        "R1: MIRA AUTOMATICA NO MAIS PROXIMO",
+        "SEM MIRA AUTOMATICA: VOCE MIRA E ATIRA",
         "QUADRADO: SUPER QUANDO A BARRA ESTIVER CHEIA",
         "START: PAUSA",
         "QUEBRE CAIXAS PARA PEGAR CUBOS DE PODER",
         "ARBUSTOS ESCONDEM VOCE. AGUA BLOQUEIA O PASSO",
-        "O MINIMAPA MOSTRA A ZONA E INIMIGOS PERTO",
+        "VIDA E MUNICAO FICAM EM CIMA DO PERSONAGEM",
         "FUJA DO GAS VERDE E SEJA O ULTIMO DE PE",
     };
     gsKit_clear(gs, RGBA(22, 20, 58));
