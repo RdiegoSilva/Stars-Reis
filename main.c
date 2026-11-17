@@ -4,8 +4,8 @@
 // Menu: CIMA/BAIXO navega | X confirma | ESQ/DIR troca a classe | START pausa
 // Jogo:
 //   Analogico esquerdo : mover (com inercia)
-//   Analogico direito  : mirar (solte para atirar)
-//   QUADRADO           : super (cada classe tem o seu)
+//   Analogico direito  : mirar   |   R1: atirar
+//   L1                 : super (cada classe tem o seu)
 #include <kernel.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,15 +33,16 @@
 #define R 12.0f
 #define PI 3.14159265f
 #define ZONE_START 1300.0f
+#define NCLS 4
 
 enum { WALL = 0, CRATE = 1, BUSH = 2, WATER = 3, ROCK = 4 };
 enum { S_TITLE = 0, S_HELP, S_PLAY, S_PAUSE, S_OVER };
 
 typedef struct {
-    float x, y, vx, vy, aim, face, hp, ammo, super, cd, recoil;
+    float x, y, vx, vy, aim, face, hp, ammo, super, cd, recoil, aimd;
     int alive, cls, cubes, aiming, place, kills, flash, since_hit, strafe_dir, strafe_t;
 } Actor;
-typedef struct { float x, y, dx, dy, life, dmg; int owner, active; } Bullet;
+typedef struct { float x, y, dx, dy, life, dmg; int owner, active; float tx, ty, t0; int lob; } Bullet;
 typedef struct { float x, y, w, h, hp; int kind; } Block;
 typedef struct { float x, y; int active; } Cube;
 typedef struct { float x, y, vx, vy, life, max, size; u64 color; int active; } Particle;
@@ -53,15 +54,16 @@ typedef struct { char a[8], b[8]; int ca, cb, gas, ttl; } Feed;
 typedef struct {
     int r, g, b;
     float speed, bspeed, life, dmg, spread, base_hp, cd, reload, kb;
-    int pellets;
+    int pellets, lob;
 } ClassDef;
-static const ClassDef CLS[3] = {
+static const ClassDef CLS[NCLS] = {
     { 255, 150,  30, 2.5f,  8.5f, 22, 16, 0.30f, 100, 14, 70, 2.2f, 3 },
     { 170,  90, 255, 2.2f, 15.0f, 55, 52, 0.00f,  80, 30, 95, 3.5f, 1 },
     {  60, 200, 120, 2.0f,  9.5f, 18, 28, 0.22f, 170, 20, 80, 1.5f, 2 },
+    { 240,  90, 170, 2.2f,  7.0f, 60, 38, 0.00f, 110, 26, 85, 3.0f, 1, 1 },
 };
-static const char *CLS_NAME[3] = { "ESTILHACO", "FALCAO", "MURALHA" };
-static const char *CLS_DESC[3] = { "3 PROJETEIS. SUPER: ANEL DE TIROS", "TIRO FORTE. SUPER: LEQUE DE 5 TIROS", "MUITA VIDA. SUPER: ONDA DE CHOQUE" };
+static const char *CLS_NAME[NCLS] = { "ESTILHACO", "FALCAO", "MURALHA", "LANCADOR" };
+static const char *CLS_DESC[NCLS] = { "3 PROJETEIS. SUPER: ANEL DE TIROS", "TIRO FORTE. SUPER: LEQUE DE 5 TIROS", "MUITA VIDA. SUPER: ONDA DE CHOQUE", "BOMBAS EM ARCO. SUPER: CHUVA DE BOMBAS" };
 
 static Actor actors[N_ACTORS];            // actors[0] = jogador
 static Bullet bullets[MAX_BULLETS];
@@ -241,7 +243,7 @@ static void reset_game(void) {
         ac->x = spx[i]; ac->y = spy[i];
         ac->aim = ac->face = a + PI;
         ac->ammo = 3; ac->alive = 1;
-        ac->cls = (i == 0) ? player_cls : rand() % 3;
+        ac->cls = (i == 0) ? player_cls : rand() % NCLS;
         ac->hp = maxhp(ac);
         ac->strafe_dir = (i & 1) ? 1 : -1; ac->strafe_t = 30 + i * 7;
         ac->since_hit = 999;
@@ -285,6 +287,20 @@ static void hurt(int who, float dmg, int src, float dirx, float diry) {
 static void fire(int who, float ang, float dmg_mult) {
     Actor *a = &actors[who];
     const ClassDef *c = &CLS[a->cls];
+    if (c->lob) {                                              // bomba lancada em arco: passa por cima de tudo
+        float rng = c->bspeed * c->life;
+        float d = clampf(a->aimd, 60, rng);
+        for (int i = 0; i < MAX_BULLETS; i++) {
+            if (bullets[i].active) continue;
+            float fl = ceilf(d / c->bspeed);
+            bullets[i] = (Bullet){ a->x, a->y, cosf(ang) * d / fl, sinf(ang) * d / fl, fl,
+                                   c->dmg * dmg_mult * (1.0f + 0.1f * a->cubes), who, 1,
+                                   clampf(a->x + cosf(ang) * d, 5, WORLD - 5),
+                                   clampf(a->y + sinf(ang) * d, 5, WORLD - 5), fl, 1 };
+            break;
+        }
+        return;
+    }
     for (int p = 0; p < c->pellets; p++) {
         for (int i = 0; i < MAX_BULLETS; i++) {
             if (bullets[i].active) continue;
@@ -295,6 +311,35 @@ static void fire(int who, float ang, float dmg_mult) {
             break;
         }
     }
+}
+static void explode(float x, float y, int owner, float dmg) {
+    burst(x, y, 22, RGBA(255, 170, 50), 4.5f, 5);
+    burst(x, y, 10, RGBA(255, 240, 160), 3.0f, 4);
+    burst(x, y, 8, RGBA(90, 80, 80), 2.0f, 6);
+    for (int k = 0; k < 20; k++) {
+        float an = 2 * PI * k / 20;
+        spawn_part(x, y, cosf(an) * 4.5f, sinf(an) * 4.5f, 18, 3, RGBA(255, 210, 90));
+    }
+    for (int j = 0; j < N_ACTORS; j++) {
+        if (j == owner || !actors[j].alive) continue;
+        float d = dist(x, y, actors[j].x, actors[j].y);
+        if (d < 58 + R) {
+            float nx = (actors[j].x - x) / (d + 0.01f), ny = (actors[j].y - y) / (d + 0.01f);
+            hurt(j, dmg, owner, nx, ny);
+        }
+    }
+    for (int k = 0; k < n_blocks; k++) {
+        Block *bl = &blocks[k];
+        if (bl->kind != CRATE || bl->hp <= 0) continue;
+        if (circle_hits_block(x, y, 58, bl)) {
+            bl->hp -= dmg;
+            if (bl->hp <= 0) {
+                burst(bl->x + 17, bl->y + 17, 10, RGBA(230, 150, 40), 2.6f, 3);
+                drop_cube(bl->x + bl->w / 2, bl->y + bl->h / 2);
+            }
+        }
+    }
+    if (dist(x, y, actors[0].x, actors[0].y) < 300 && shake < 5) shake = 5;
 }
 static int try_shoot(int who, float ang) {
     Actor *a = &actors[who];
@@ -314,6 +359,13 @@ static void use_super(int who) {
         for (int k = 0; k < 16; k++) fire(who, 2 * PI * k / 16, 1.5f);
     } else if (a->cls == 1) {
         for (int k = -2; k <= 2; k++) fire(who, a->aim + k * 0.1f, 1.3f);
+    } else if (a->cls == 3) {
+        float base = a->aimd > 140 ? a->aimd : 140;
+        for (int k = -2; k <= 2; k++) {
+            a->aimd = base * (1.0f - 0.07f * abs(k));
+            fire(who, a->aim + k * 0.22f, 1.0f);
+        }
+        a->aimd = base;
     } else {
         for (int j = 0; j < N_ACTORS; j++) {
             if (j == who || !actors[j].alive) continue;
@@ -396,6 +448,7 @@ static void update_bots(void) {
                 aim_t = atan2f(t->y + t->vy * tt - b->y, t->x + t->vx * tt - b->x);
                 has_aim = 1;
                 float err = fabsf(angle_diff(b->aim, aim_t));
+                b->aimd = d;
                 if (d < range && err < 0.2f) try_shoot(i, b->aim + frand(-0.07f, 0.07f));
                 if (b->super >= 100 && d < 230 && err < 0.25f) use_super(i);
                 float toward = atan2f(t->y - b->y, t->x - b->x);
@@ -417,7 +470,7 @@ static void update_bots(void) {
                     float tx = blocks[ci].x + 17, ty = blocks[ci].y + 17;
                     float a = atan2f(ty - b->y, tx - b->x);
                     aim_t = a; has_aim = 1;
-                    if (cd < 150 && fabsf(angle_diff(b->aim, a)) < 0.2f) try_shoot(i, b->aim);
+                    b->aimd = cd; if (cd < 150 && fabsf(angle_diff(b->aim, a)) < 0.2f) try_shoot(i, b->aim);
                     if (cd > 70) { mvx = cosf(a); mvy = sinf(a); mag = 1; }
                 } else {
                     float a = atan2f(WORLD / 2 - b->y, WORLD / 2 - b->x);
@@ -457,9 +510,17 @@ static void update(struct padButtonStatus *pad, u32 btns, u32 prev) {
         float lm = sqrtf(lx * lx + ly * ly);
         if (lm > 0.2f) { float s = (lm - 0.2f) / 0.8f; if (s > 1) s = 1; lx = lx / lm * s; ly = ly / lm * s; } else { lx = 0; ly = 0; }
         accel_move(p, lx, ly, c->speed * (p->aiming ? 0.75f : 1.0f));
-        if (fabsf(rx) > 0.35f || fabsf(ry) > 0.35f) { p->aim = atan2f(ry, rx); p->aiming = 1; }
-        else if (p->aiming) { try_shoot(0, p->aim); p->aiming = 0; }   // solta = atira
-        if ((btns & PAD_SQUARE) && !(prev & PAD_SQUARE)) use_super(0);
+        float rm = sqrtf(rx * rx + ry * ry), rng = c->bspeed * c->life;
+        if (rm > 0.35f) {                                              // analogico direito so mira
+            p->aim = atan2f(ry, rx); p->aiming = 1;
+            p->aimd = 90 + clampf((rm - 0.35f) / 0.65f, 0, 1) * (rng - 90);   // lancador: quanto mais empurra, mais longe
+        } else {
+            p->aiming = 0;
+            if (lm > 0.2f) p->aim = atan2f(ly, lx);                    // sem mirar: arma segue o movimento
+            p->aimd = rng * 0.6f;
+        }
+        if (btns & PAD_R1) try_shoot(0, p->aim);                       // R1 atira (segure para repetir)
+        if ((btns & PAD_L1) && !(prev & PAD_L1)) use_super(0);
     }
     update_bots();
 
@@ -492,6 +553,11 @@ static void update(struct padButtonStatus *pad, u32 btns, u32 prev) {
     for (int i = 0; i < MAX_BULLETS; i++) {
         Bullet *b = &bullets[i];
         if (!b->active) continue;
+        if (b->lob) {                                                  // em arco: sem colisao ate chegar ao alvo
+            b->x += b->dx; b->y += b->dy;
+            if (--b->life <= 0) { b->x = b->tx; b->y = b->ty; b->active = 0; explode(b->tx, b->ty, b->owner, b->dmg); }
+            continue;
+        }
         for (int s = 0; s < 2 && b->active; s++) {                // 2 sub-passos evitam atravessar alvos
             b->x += b->dx * 0.5f; b->y += b->dy * 0.5f;
             for (int k = 0; k < n_blocks; k++) {
@@ -651,8 +717,8 @@ static void bar(int x, int y, int w, int h, float f, u64 fill, u64 hi, int z) {
 }
 
 // ---------- personagens humanos ----------
-static const int SKIN_C[3][3] = { { 255, 206, 160 }, { 242, 192, 152 }, { 196, 140, 98 } };
-static const int HAIR_C[3][3] = { { 214, 74, 30 }, { 76, 44, 130 }, { 44, 32, 26 } };
+static const int SKIN_C[NCLS][3] = { { 255, 206, 160 }, { 242, 192, 152 }, { 196, 140, 98 }, { 236, 182, 140 } };
+static const int HAIR_C[NCLS][3] = { { 214, 74, 30 }, { 76, 44, 130 }, { 44, 32, 26 }, { 34, 38, 74 } };
 
 static int visible_to(const Actor *a, int i, const Actor *p) {
     return !(i != 0 && in_bush(a->x, a->y) && dist(a->x, a->y, p->x, p->y) > 90);
@@ -694,7 +760,9 @@ static void draw_human(float sx, float sy, int cls, float face, float aim, float
     fcircle(hx, hy, 3.0f, skin, gz);
     for (int d = 5; d <= 17; d += 4) {
         float g = d - recoil * 0.5f;
-        fcircle(hx + cosf(aim) * g, hy + sinf(aim) * g, d == 17 ? 2.0f : 2.6f, d == 17 ? RGBA(120, 122, 140) : RGBA(60, 62, 78), gz);
+        float gr = cls == 3 ? (d == 17 ? 3.4f : 3.8f) : (d == 17 ? 2.0f : 2.6f);       // lancador: tubo grosso
+        u64 gc = d == 17 ? (cls == 3 ? RGBA(255, 150, 50) : RGBA(120, 122, 140)) : RGBA(60, 62, 78);
+        fcircle(hx + cosf(aim) * g, hy + sinf(aim) * g, gr, gc, gz);
     }
     fcircle(sx - sh * 9, by + 1, 3.4f, body, 18);
     fcircle(sx - sh * 9.5f, by + 6, 3.0f, skin, 18);
@@ -723,8 +791,12 @@ static void draw_human(float sx, float sy, int cls, float face, float aim, float
         gsKit_prim_triangle(gs, sx + 1, hy2 - 6, sx + 4, hy2 - 14, sx + 7, hy2 - 4, 21, hair);
     } else if (cls == 1) {
         rect(sx - 6.8f, hy2 - 3, sx + 6.8f, hy2 - 1, body, 21);               // faixa
-    } else {
+    } else if (cls == 2) {
         rect(sx - 7, hy2 - 1, sx + 7, hy2 + 0.5f, ccol(2, 70), 21);           // aba do capacete
+    } else {
+        rect(sx - 7.5f, hy2 - 4, sx + 7.5f, hy2 - 1.5f, RGBA(40, 40, 60), 22); // oculos de lancador
+        fcircle(sx - 3.5f, hy2 - 2.7f, 2.7f, RGBA(255, 220, 60), 22);
+        fcircle(sx + 3.5f, hy2 - 2.7f, 2.7f, RGBA(255, 220, 60), 22);
     }
 }
 
@@ -841,6 +913,22 @@ static void render_world(float ox, float oy, const Actor *p) {
     for (int i = 0; i < MAX_BULLETS; i++) if (bullets[i].active) {
         const Bullet *b = &bullets[i];
         int cl = actors[b->owner].cls;
+        if (b->lob) {
+            float pr = 1.0f - b->life / (b->t0 > 0 ? b->t0 : 1.0f);
+            float arc = sinf(pr * PI) * 46.0f;
+            float gx = b->x + ox, gy = b->y + oy;
+            for (int k = 0; k < 14; k++) {                              // circulo de perigo no alvo
+                float a1 = 2 * PI * k / 14, a2 = 2 * PI * (k + 1) / 14;
+                gsKit_prim_line(gs, b->tx + ox + cosf(a1) * 55, b->ty + oy + sinf(a1) * 55,
+                                    b->tx + ox + cosf(a2) * 55, b->ty + oy + sinf(a2) * 55, 10, RGBA(255, 90, 100));
+            }
+            fellipse(gx, gy + 4, 7, 3, RGBA(150, 118, 70), 10);
+            fcircle(gx, gy - arc, 7, RGBA(24, 22, 44), 12);
+            fcircle(gx, gy - arc, 5.5f, RGBA(70, 72, 96), 13);
+            fcircle(gx - 2, gy - arc - 2, 2, RGBA(170, 175, 200), 14);
+            fcircle(gx + 3, gy - arc - 8, 2, (anim / 3) % 2 ? RGBA(255, 220, 80) : RGBA(255, 120, 40), 14);
+            continue;
+        }
         fcircle(b->x - b->dx * 0.7f + ox, b->y - b->dy * 0.7f + oy, 3, ccol(cl, -40), 11);
         fcircle(b->x + ox, b->y + oy, 5, ccol(cl, 0), 12);
         fcircle(b->x + ox, b->y + oy, 2.5f, RGBA(255, 255, 255), 13);
@@ -882,12 +970,13 @@ static void render_world(float ox, float oy, const Actor *p) {
     // linha de mira
     if (p->alive && p->aiming) {
         const ClassDef *c = &CLS[p->cls];
-        float len = c->bspeed * c->life;
+        float len = c->lob ? p->aimd : c->bspeed * c->life;
+        float rr = c->lob ? 55.0f : 9.0f;
         for (float d = 28; d < len; d += 24)
             fcircle(p->x + ox + cosf(p->aim) * d, p->y + oy + sinf(p->aim) * d, 2.5f - d / len, RGBA(255, 255, 255), 29);
-        for (int k = 0; k < 8; k++) {
-            float a = 2 * PI * k / 8 + anim * 0.05f;
-            fcircle(p->x + ox + cosf(p->aim) * len + cosf(a) * 9, p->y + oy + sinf(p->aim) * len + sinf(a) * 9, 2, ccol(p->cls, 40), 29);
+        for (int k = 0; k < 16; k++) {
+            float a = 2 * PI * k / 16 + anim * 0.05f;
+            fcircle(p->x + ox + cosf(p->aim) * len + cosf(a) * rr, p->y + oy + sinf(p->aim) * len + sinf(a) * rr, 2, ccol(p->cls, 40), 29);
         }
     }
 }
@@ -976,7 +1065,7 @@ static void render_hud(const Actor *p) {
             snprintf(buf, sizeof(buf), "%d%%", (int)p->super);
             text_sh((int)(bx - text_w(buf, 2) / 2.0f), (int)by - 7, 2, RGBA(200, 225, 255), buf);
         }
-        text_sh((int)(bx - text_w("QUADRADO", 1) / 2.0f), SCR_H - 30, 1, RGBA(255, 255, 255), "QUADRADO");
+        text_sh((int)(bx - text_w("L1", 1) / 2.0f), SCR_H - 30, 1, RGBA(255, 255, 255), "L1");
     }
 
     // avisos da zona
@@ -988,7 +1077,7 @@ static void render_hud(const Actor *p) {
     }
     if (ingas && (anim / 20) % 2 == 0) ctext(70, 3, RGBA(255, 92, 138), "FORA DA ZONA!");
     if (!p->alive && winner < 0) ctext(70, 3, RGBA(255, 92, 138), "VOCE FOI ELIMINADO");
-    if (p->alive && frame_count < 480) ctext(396, 2, RGBA(255, 232, 120), "ANALOGICO DIR: MIRE E SOLTE   QUADRADO: SUPER");
+    if (p->alive && frame_count < 480) ctext(396, 2, RGBA(255, 232, 120), "DIR: MIRAR   R1: ATIRAR   L1: SUPER");
     tz = 60;
 }
 
@@ -1047,8 +1136,8 @@ static void render_title(void) {
     const char *items[3] = { "JOGAR", cls_line, "COMO JOGAR" };
     draw_items(170, 3, items, 3, menu_sel);
 
-    for (int i = 0; i < 3; i++) {                      // previa das classes
-        float cx = SCR_W / 2 + (i - 1) * 100, cy = 340;
+    for (int i = 0; i < NCLS; i++) {                      // previa das classes
+        float cx = SCR_W / 2 + (i - 1.5f) * 90, cy = 340;
         int sel = (i == player_cls);
         fcircle(cx, cy, sel ? 26 : 18, sel ? RGBA(255, 255, 255) : RGBA(10, 8, 30), 17);
         fcircle(cx, cy, sel ? 22 : 15, ccol(i, 0), 18);
@@ -1061,19 +1150,20 @@ static void render_title(void) {
 static void render_help(void) {
     static const char *lines[] = {
         "ANALOGICO ESQ: MOVER (COM INERCIA)",
-        "ANALOGICO DIR: MIRAR E SOLTAR PARA ATIRAR",
-        "SEM MIRA AUTOMATICA: VOCE MIRA E ATIRA",
-        "QUADRADO: SUPER QUANDO A BARRA ESTIVER CHEIA",
+        "ANALOGICO DIR: MIRAR (SO MIRA, NAO ATIRA)",
+        "R1: ATIRAR (SEGURE PARA REPETIR)",
+        "L1: SUPER QUANDO O BOTAO ESTIVER AMARELO",
         "START: PAUSA",
         "QUEBRE CAIXAS PARA PEGAR CUBOS DE PODER",
         "ARBUSTOS ESCONDEM VOCE. AGUA BLOQUEIA O PASSO",
         "VIDA E MUNICAO FICAM EM CIMA DO PERSONAGEM",
+        "LANCADOR: EMPURRE MAIS O ANALOGICO PARA LANCAR LONGE",
         "FUJA DO GAS VERDE E SEJA O ULTIMO DE PE",
     };
     gsKit_clear(gs, RGBA(22, 20, 58));
     render_bg_checker();
     ctext(26, 5, RGBA(255, 210, 63), "COMO JOGAR");
-    for (int i = 0; i < 9; i++) text_sh(40, 100 + i * 29, 2, RGBA(255, 255, 255), lines[i]);
+    for (int i = 0; i < 10; i++) text_sh(40, 100 + i * 29, 2, RGBA(255, 255, 255), lines[i]);
     ctext(410, 2, RGBA(185, 180, 230), "X: VOLTAR");
 }
 
@@ -1121,8 +1211,8 @@ int main(void) {
         case S_TITLE:
             nav(pressed, 3);
             if (menu_sel == 1) {
-                if (pressed & PAD_LEFT) player_cls = (player_cls + 2) % 3;
-                if (pressed & (PAD_RIGHT | PAD_CROSS)) player_cls = (player_cls + 1) % 3;
+                if (pressed & PAD_LEFT) player_cls = (player_cls + NCLS - 1) % NCLS;
+                if (pressed & (PAD_RIGHT | PAD_CROSS)) player_cls = (player_cls + 1) % NCLS;
             } else if (pressed & PAD_CROSS) {
                 if (menu_sel == 0) { reset_game(); state = S_PLAY; }
                 else if (menu_sel == 2) state = S_HELP;

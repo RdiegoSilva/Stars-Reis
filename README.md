@@ -11,14 +11,18 @@ recarga e super. Personagens e nomes sao originais.
 
 ## Controles
 - Analogico esquerdo: mover (com inercia)
-- Analogico direito: mirar; ao soltar, atira (tudo manual, sem mira automatica)
-- QUADRADO: super (quando o botao de super no canto inferior direito estiver amarelo)
+- Analogico direito: so mira (soltar NAO atira). Sem mirar, a arma segue o movimento.
+- R1: atira (segure para repetir enquanto houver municao)
+- L1: super (quando o botao de super no canto inferior direito estiver amarelo)
 - START: pausa | CIMA/BAIXO/X: menus
 
 ## Classes (originais)
 - Estilhaco (laranja): 3 projeteis, curto alcance
 - Falcao (roxo): 1 tiro forte, longo alcance, pouca vida
 - Muralha (verde): muita vida, 2 projeteis
+- Lancador (rosa): bomba lancada em arco que passa por cima de paredes e agua e explode
+  em area. Quanto mais voce empurra o analogico direito, mais longe a bomba cai (a mira
+  mostra o circulo da explosao). Super: chuva de 5 bombas.
 
 ## Tela
 - Sem HUD de barras: vida (com numero), 3 segmentos de municao, nome e cubos ficam
