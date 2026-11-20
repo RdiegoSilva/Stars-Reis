@@ -12,8 +12,11 @@ recarga e super. Personagens e nomes sao originais.
 ## Menu principal (abas)
 - L1 / R1: troca de aba entre JOGAR, PERSONAGENS e COMO JOGAR
 - JOGAR: X ou START inicia; ESQ/DIR troca rapido o personagem
-- PERSONAGENS: ESQ/DIR navega nas cartas (stats de vida, dano, velocidade e alcance),
-  X escolhe (a carta ganha a coroa "EM USO"), START escolhe e ja joga, O volta
+- PERSONAGENS: grade de cards (3 x 2) em fundo azul. Setas navegam, X escolhe (a carta
+  escolhida ganha coroa e o selo "EM USO"), START escolhe e ja joga, O volta.
+  Cada card mostra retrato, 4 mini barras (vida, dano, velocidade, alcance), selo roxo com
+  suas vitorias (VIT) e trofeu com seu recorde de abates (valem enquanto o jogo esta aberto).
+  O painel de baixo detalha o personagem selecionado. O ultimo espaco e "EM BREVE".
 - COMO JOGAR: controles e dicas; X volta
 
 ## Controles
@@ -29,7 +32,8 @@ recarga e super. Personagens e nomes sao originais.
 - Muralha (verde): muita vida, 2 projeteis
 - Lancador (rosa): bomba lancada em arco que passa por cima de paredes e agua e explode
   em area. Quanto mais voce empurra o analogico direito, mais longe a bomba cai (a mira
-  mostra o circulo da explosao). Super: chuva de 5 bombas.
+  mostra o circulo da explosao). A bomba pousa e explode 0,6 s depois (um anel fecha no
+  chao avisando), dando tempo de fugir. Super: chuva de 5 bombas.
 
 - Ninja (azul-aco): 2 kunais rapidos, o mais veloz. Super: fica invisivel por 7 segundos
   (+20% de velocidade). Os bots nao enxergam voce a mais de 70 de distancia; voce se ve como

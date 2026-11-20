@@ -34,6 +34,7 @@
 #define PI 3.14159265f
 #define ZONE_START 1300.0f
 #define NCLS 5
+#define LOB_FUSE 36                           // lancador: a bomba pousa e explode 0.6 s depois (36 quadros)
 #define INVIS_FRAMES 420                      // ninja: 7 segundos a 60 quadros
 
 enum { WALL = 0, CRATE = 1, BUSH = 2, WATER = 3, ROCK = 4 };
@@ -79,7 +80,8 @@ static char names[N_ACTORS][8];
 static float spx[N_ACTORS], spy[N_ACTORS];
 static int n_blocks, frame_count, winner, player_cls = 0;
 static int state = S_TITLE, menu_sel = 0, anim = 0, dead_timer = 0, tz = 60;
-static int tab = 0, char_cur = 0, pick_flash = 0;      // menu principal: aba atual, cursor de personagem, aviso "escolhido"
+static int tab = 0, char_cur = 0, pick_flash = 0, bg_blue = 0;
+static int cls_wins[NCLS], cls_best[NCLS];            // recordes da sessao por classe      // menu principal: aba atual, cursor de personagem, aviso "escolhido"
 static float zone_r, zone_from, shake;
 
 static char padBuf[256] __attribute__((aligned(64)));
@@ -561,9 +563,17 @@ static void update(struct padButtonStatus *pad, u32 btns, u32 prev) {
     for (int i = 0; i < MAX_BULLETS; i++) {
         Bullet *b = &bullets[i];
         if (!b->active) continue;
+        if (b->lob == 2) {                                             // bomba no chao: pavio de 0.6 s
+            if (--b->life <= 0) { b->active = 0; explode(b->tx, b->ty, b->owner, b->dmg); }
+            continue;
+        }
         if (b->lob) {                                                  // em arco: sem colisao ate chegar ao alvo
             b->x += b->dx; b->y += b->dy;
-            if (--b->life <= 0) { b->x = b->tx; b->y = b->ty; b->active = 0; explode(b->tx, b->ty, b->owner, b->dmg); }
+            if (--b->life <= 0) {
+                b->x = b->tx; b->y = b->ty; b->dx = b->dy = 0;
+                b->lob = 2; b->life = LOB_FUSE;                        // pousou: acende o pavio
+                burst(b->x, b->y, 5, RGBA(150, 118, 70), 1.5f, 3);
+            }
             continue;
         }
         for (int s = 0; s < 2 && b->active; s++) {                // 2 sub-passos evitam atravessar alvos
@@ -932,19 +942,25 @@ static void render_world(float ox, float oy, const Actor *p) {
         const Bullet *b = &bullets[i];
         int cl = actors[b->owner].cls;
         if (b->lob) {
-            float pr = 1.0f - b->life / (b->t0 > 0 ? b->t0 : 1.0f);
-            float arc = sinf(pr * PI) * 46.0f;
+            int ground = (b->lob == 2);
+            float pr = ground ? 1.0f : 1.0f - b->life / (b->t0 > 0 ? b->t0 : 1.0f);
+            float arc = ground ? 0.0f : sinf(pr * PI) * 46.0f;
+            float fz = ground ? b->life / (float)LOB_FUSE : 1.0f;              // 1 -> 0 durante o pavio
             float gx = b->x + ox, gy = b->y + oy;
             for (int k = 0; k < 14; k++) {                              // circulo de perigo no alvo
                 float a1 = 2 * PI * k / 14, a2 = 2 * PI * (k + 1) / 14;
                 gsKit_prim_line(gs, b->tx + ox + cosf(a1) * 55, b->ty + oy + sinf(a1) * 55,
-                                    b->tx + ox + cosf(a2) * 55, b->ty + oy + sinf(a2) * 55, 10, RGBA(255, 90, 100));
+                                    b->tx + ox + cosf(a2) * 55, b->ty + oy + sinf(a2) * 55, 10,
+                                    ground && (anim / 3) % 2 ? RGBA(255, 230, 120) : RGBA(255, 90, 100));
+                if (ground)                                                    // anel interno fecha ate explodir
+                    gsKit_prim_line(gs, b->tx + ox + cosf(a1) * 55 * (1 - fz), b->ty + oy + sinf(a1) * 55 * (1 - fz),
+                                        b->tx + ox + cosf(a2) * 55 * (1 - fz), b->ty + oy + sinf(a2) * 55 * (1 - fz), 10, RGBA(255, 255, 255));
             }
             fellipse(gx, gy + 4, 7, 3, RGBA(150, 118, 70), 10);
             fcircle(gx, gy - arc, 7, RGBA(24, 22, 44), 12);
             fcircle(gx, gy - arc, 5.5f, RGBA(70, 72, 96), 13);
             fcircle(gx - 2, gy - arc - 2, 2, RGBA(170, 175, 200), 14);
-            fcircle(gx + 3, gy - arc - 8, 2, (anim / 3) % 2 ? RGBA(255, 220, 80) : RGBA(255, 120, 40), 14);
+            fcircle(gx + 3, gy - arc - 8, ground ? 2.0f + (1 - fz) * 2.5f : 2.0f, (anim / (ground && fz < 0.4f ? 2 : 3)) % 2 ? RGBA(255, 220, 80) : RGBA(255, 120, 40), 14);
             continue;
         }
         fcircle(b->x - b->dx * 0.7f + ox, b->y - b->dy * 0.7f + oy, 3, ccol(cl, -40), 11);
@@ -1164,6 +1180,7 @@ static const char *CLS_SUP[NCLS]  = { "ANEL DE TIROS", "LEQUE DE 5 TIROS", "ONDA
 static int lerpi(int a, int b, float t) { return (int)(a + (b - a) * t + 0.5f); }
 static u64 bg_col(float y, int add) {                     // degrade vertical roxo -> azul escuro
     float t = clampf(y / SCR_H, 0, 1);
+    if (bg_blue) return RGBA(lerpi(44, 26, t) + add, lerpi(116, 80, t) + add, lerpi(236, 200, t) + add);   // azul vivo (aba PERSONAGENS)
     return RGBA(lerpi(44, 14, t) + add, lerpi(26, 18, t) + add, lerpi(104, 48, t) + add * 2);
 }
 static u64 tint(int cls, float k) {                       // cor da classe misturada com o azul do menu
@@ -1264,11 +1281,6 @@ static void render_footer(const char *hint) {
     ctext(420, 2, MUTED, hint);
 }
 
-static void stat_row(int x, int y, const char *label, float f, u64 fill, u64 hi) {
-    text_sh(x, y, 2, RGBA(255, 255, 255), label);
-    bar(x + 90, y + 2, 76, 10, clampf(f, 0.08f, 1.0f), fill, hi, 24);
-}
-
 static void pedestal(float cx, float cy, float rx) {
     fellipse(cx, cy + 3, rx + 3, rx * 0.30f + 3, RGBA(8, 6, 24), 8);
     fellipse(cx, cy, rx, rx * 0.30f, GOLD, 9);
@@ -1314,44 +1326,120 @@ static void render_tab_play(void) {
     preview_human(500, 338, player_cls);
 }
 
-static void render_tab_chars(void) {
-    if (pick_flash > 0) ctext(50, 3, RGBA(110, 255, 150), "PERSONAGEM ESCOLHIDO!");
-    else ctext(50, 3, GOLD, "ESCOLHA SEU PERSONAGEM");
+// ---- aba PERSONAGENS: grade de cards (estilo selecao de lutadores) ----
+#define N_SLOTS 6                                                  // 5 classes + 1 "em breve"
+static void class_stats(int ci, float st[4]) {
+    const ClassDef *c = &CLS[ci];
+    st[0] = c->base_hp / 170.0f;
+    st[1] = c->dmg * c->pellets / 60.0f;
+    st[2] = c->speed / 2.7f;
+    st[3] = sqrtf(c->bspeed * c->life / 825.0f);
+}
+static void draw_cup(int x, int y, u64 col) {                     // trofeu 10x10
+    rect(x + 1, y, x + 9, y + 6, col, 47);
+    rect(x, y + 1, x + 1, y + 4, col, 47);
+    rect(x + 9, y + 1, x + 10, y + 4, col, 47);
+    rect(x + 4, y + 6, x + 6, y + 8, col, 47);
+    rect(x + 2, y + 8, x + 8, y + 10, col, 47);
+}
+static void mini_bar(int x, int y, float f, u64 fill, u64 hi) { bar(x, y, 52, 7, clampf(f, 0.08f, 1.0f), fill, hi, 24); }
 
-    for (int i = 0; i < NCLS; i++) {                                        // cartas
-        int sel = (i == char_cur), eq = (i == player_cls);
-        int x0 = 23 + i * 120, y0 = sel ? 88 : 96, y1 = y0 + 166;
-        u64 edge = sel ? ((anim / 8) % 2 ? GOLD : GOLD_HI) : RGBA(70, 64, 140);
-        panel(x0, y0, x0 + 114, y1, edge, tint(i, sel ? 0.38f : 0.20f), 7);
-        rect(x0 + 3, y0 + 3, x0 + 111, y0 + 9, ccol(i, sel ? 20 : -40), 9);
-        draw_portrait(x0 + 20, y0 + 14, 74, i, ccol(i, 40));
-        int nw = text_w(CLS_NAME[i], 2);
-        text_sh(x0 + 57 - nw / 2, y0 + 98, 2, RGBA(255, 255, 255), CLS_NAME[i]);
-        text_sh(x0 + 57 - text_w(CLS_ROLE[i], 1) / 2, y0 + 118, 1, ccol(i, 70), CLS_ROLE[i]);
-        if (eq) {
-            pill(x0 + 8, y0 + 134, 98, 22, RGBA(20, 100, 50), RGBA(70, 226, 100), 10);
-            draw_text(x0 + 57 - text_w("EM USO", 2) / 2, y0 + 138, 2, RGBA(10, 50, 24), 50, "EM USO");
-            draw_crown(x0 + 57, y0 + 4, 13, 28);
-        } else if (sel && (anim / 20) % 2 == 0) {
-            pill(x0 + 8, y0 + 134, 98, 22, GOLD_INK, GOLD, 10);
-            draw_text(x0 + 57 - text_w("X: ESCOLHER", 1) / 2, y0 + 142, 1, GOLD_INK, 50, "X: ESCOLHER");
-        }
+static void char_card(int i, int x0, int y0, int sel) {
+    const int W = 180, H = 104;
+    int x1 = x0 + W, y1 = y0 + H, eq = (i == player_cls);
+    float st[4]; class_stats(i, st);
+    char buf[16];
+    u64 ink = RGBA(10, 8, 30);
+
+    if (sel) rect(x0 - 4, y0 - 4, x1 + 4, y1 + 4, (anim / 8) % 2 ? RGBA(255, 255, 255) : GOLD, 7);
+    panel(x0, y0, x1, y1, ink, ccol(i, 15), 7);
+    rect(x0 + 3, y0 + 40, x1 - 3, y1 - 3, ccol(i, -35), 9);                // degrade inferior
+    rect(x0 + 148, y0 + 3, x1 - 3, y1 - 26, ccol(i, -100), 10);            // coluna da direita
+    rect(x0 + 3, y1 - 26, x1 - 3, y1 - 3, ccol(i, -125), 10);              // faixa do nome
+
+    draw_portrait(x0 + 8, y0 + 8, 66, i, ink);
+    mini_bar(x0 + 86, y0 + 10, st[0], RGBA(70, 226, 100), RGBA(160, 255, 170));
+    mini_bar(x0 + 86, y0 + 24, st[1], RGBA(255, 74, 90),  RGBA(255, 150, 150));
+    mini_bar(x0 + 86, y0 + 38, st[2], RGBA(53, 201, 245), RGBA(150, 230, 255));
+    mini_bar(x0 + 86, y0 + 52, st[3], RGBA(255, 190, 40), GOLD_HI);
+
+    fcircle(x0 + 162, y0 + 22, 12, RGBA(255, 255, 255), 46);              // selo roxo: vitorias
+    fcircle(x0 + 162, y0 + 22, 10, RGBA(150, 60, 230), 47);
+    snprintf(buf, sizeof(buf), "%d", cls_wins[i] > 9 ? 9 : cls_wins[i]);
+    text_sh(x0 + 162 - text_w(buf, 2) / 2, y0 + 15, 2, RGBA(255, 255, 255), buf);
+    text_sh(x0 + 162 - text_w("VIT", 1) / 2, y0 + 38, 1, RGBA(255, 255, 255), "VIT");
+
+    rect(x0 + 4, y0 + 58, x0 + 44, y0 + 74, ink, 46);                      // trofeu: recorde de abates
+    draw_cup(x0 + 7, y0 + 61, GOLD);
+    snprintf(buf, sizeof(buf), "%d", cls_best[i]);
+    text_sh(x0 + 22, y0 + 63, 1, RGBA(255, 255, 255), buf);
+
+    text_sh(x0 + W / 2 - text_w(CLS_NAME[i], 2) / 2, y1 - 22, 2, RGBA(255, 255, 255), CLS_NAME[i]);
+    if (eq) draw_crown(x0 + 78, y0 + 4, 11, 28);
+    if (i == NCLS - 1) {                                                   // etiqueta NOVO
+        rect(x0 + 4, y0 - 6, x0 + 37, y0 + 8, ink, 46);
+        rect(x0 + 5, y0 - 5, x0 + 36, y0 + 7, RGBA(226, 48, 64), 47);
+        text_sh(x0 + 8, y0 - 2, 1, RGBA(255, 255, 255), "NOVO");
+    }
+}
+
+static void locked_card(int x0, int y0) {
+    const int W = 180, H = 104;
+    int x1 = x0 + W, y1 = y0 + H, cx = x0 + 74, cy = y0 + 40;
+    panel(x0, y0, x1, y1, RGBA(10, 8, 30), RGBA(36, 48, 112), 7);
+    rect(x0 + 3, y1 - 26, x1 - 3, y1 - 3, RGBA(22, 30, 80), 10);
+    rect(cx - 7, cy - 16, cx + 7, cy - 2, RGBA(150, 160, 190), 11);          // cadeado
+    rect(cx - 4, cy - 13, cx + 4, cy - 2, RGBA(36, 48, 112), 12);
+    rect(cx - 12, cy - 4, cx + 12, cy + 18, RGBA(10, 8, 30), 13);
+    rect(cx - 10, cy - 2, cx + 10, cy + 16, GOLD, 14);
+    rect(cx - 2, cy + 4, cx + 2, cy + 11, GOLD_INK, 15);
+    text_sh(x0 + W / 2 - text_w("EM BREVE", 2) / 2, y1 - 22, 2, MUTED, "EM BREVE");
+}
+
+static void small_stat(int x, int y, const char *label, float f, u64 fill, u64 hi) {
+    text_sh(x, y + 1, 1, RGBA(255, 255, 255), label);
+    bar(x + 58, y, 84, 9, clampf(f, 0.08f, 1.0f), fill, hi, 24);
+}
+
+static void render_tab_chars(void) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "PERSONAGENS %d/%d", NCLS, N_SLOTS);
+    text_sh(42, 54, 2, RGBA(255, 255, 255), buf);
+    if (pick_flash > 0) {
+        const char *m = "PERSONAGEM ESCOLHIDO!";
+        text_sh(598 - text_w(m, 2), 54, 2, RGBA(150, 255, 170), m);
     }
 
-    const ClassDef *c = &CLS[char_cur];                                     // detalhes
-    panel(42, 274, 598, 398, NAVY_EDGE, NAVY_FILL, 7);
-    preview_human(108, 340, char_cur);
-    rect(172, 284, 174, 388, NAVY_EDGE, 9);
-    stat_row(184, 288, "VIDA",    c->base_hp / 170.0f,                   RGBA(70, 226, 100), RGBA(160, 255, 170));
-    stat_row(184, 316, "DANO",    c->dmg * c->pellets / 60.0f,           RGBA(255, 74, 90),  RGBA(255, 150, 150));
-    stat_row(184, 344, "VELOC",   c->speed / 2.7f,                       RGBA(53, 201, 245), RGBA(150, 230, 255));
-    stat_row(184, 372, "ALCANCE", sqrtf(c->bspeed * c->life / 825.0f),   RGBA(255, 190, 40), GOLD_HI);
-    rect(362, 284, 364, 388, NAVY_EDGE, 9);
-    text_sh(376, 284, 3, ccol(char_cur, 30), CLS_NAME[char_cur]);
-    text_sh(376, 316, 1, GOLD, "ATAQUE");
-    text_sh(376, 328, 2, RGBA(255, 255, 255), CLS_ATK[char_cur]);
-    text_sh(376, 354, 1, GOLD, "SUPER");
-    text_sh(376, 366, 2, RGBA(255, 255, 255), CLS_SUP[char_cur]);
+    for (int i = 0; i < N_SLOTS; i++) {                                     // grade 3 x 2
+        int x0 = 42 + (i % 3) * 188, y0 = 80 + (i / 3) * 112;
+        if (i < NCLS) char_card(i, x0, y0, i == char_cur);
+        else locked_card(x0, y0);
+    }
+
+    const ClassDef *c = &CLS[char_cur];                                     // detalhes do selecionado
+    float st[4]; class_stats(char_cur, st);
+    panel(42, 304, 598, 398, RGBA(10, 8, 30), RGBA(22, 36, 110), 7);
+    preview_human(98, 346, char_cur);
+    rect(152, 312, 154, 390, RGBA(60, 90, 190), 9);
+    small_stat(164, 312, "VIDA",    st[0], RGBA(70, 226, 100), RGBA(160, 255, 170));
+    small_stat(164, 332, "DANO",    st[1], RGBA(255, 74, 90),  RGBA(255, 150, 150));
+    small_stat(164, 352, "VELOC",   st[2], RGBA(53, 201, 245), RGBA(150, 230, 255));
+    small_stat(164, 372, "ALCANCE", st[3], RGBA(255, 190, 40), GOLD_HI);
+    rect(322, 312, 324, 390, RGBA(60, 90, 190), 9);
+    (void)c;
+    text_sh(336, 310, 3, ccol(char_cur, 40), CLS_NAME[char_cur]);
+    text_sh(336, 334, 1, MUTED, CLS_ROLE[char_cur]);
+    text_sh(336, 346, 1, GOLD, "ATAQUE");
+    text_sh(336, 355, 2, RGBA(255, 255, 255), CLS_ATK[char_cur]);
+    text_sh(336, 374, 1, GOLD, "SUPER");
+    text_sh(336, 383, 2, RGBA(255, 255, 255), CLS_SUP[char_cur]);
+    if (char_cur == player_cls) {
+        pill(512, 308, 80, 20, RGBA(20, 100, 50), RGBA(70, 226, 100), 10);
+        draw_text(552 - text_w("EM USO", 2) / 2, 312, 2, RGBA(10, 50, 24), 50, "EM USO");
+    } else if ((anim / 20) % 2 == 0) {
+        pill(512, 308, 80, 20, GOLD_INK, GOLD, 10);
+        draw_text(552 - text_w("X: ESCOLHER", 1) / 2, 315, 1, GOLD_INK, 50, "X: ESCOLHER");
+    }
 }
 
 static void render_tab_help(void) {
@@ -1380,6 +1468,7 @@ static void render_tab_help(void) {
 
 static void render_title(void) {
     tz = 50;
+    bg_blue = (tab == 1);
     render_bg();
     render_tabs();
     if (tab == 0) {
@@ -1387,7 +1476,7 @@ static void render_title(void) {
         render_footer("X: JOGAR   < >: TROCAR   L1 R1: ABAS");
     } else if (tab == 1) {
         render_tab_chars();
-        render_footer("< >: VER   X: ESCOLHER   START: JOGAR");
+        render_footer("SETAS: VER   X: ESCOLHER   START: JOGAR");
     } else {
         render_tab_help();
         render_footer("L1 R1: ABAS   X: VOLTAR");
@@ -1450,6 +1539,8 @@ int main(void) {
             } else if (tab == 1) {                                           // PERSONAGENS
                 if (pressed & PAD_LEFT) char_cur = (char_cur + NCLS - 1) % NCLS;
                 if (pressed & PAD_RIGHT) char_cur = (char_cur + 1) % NCLS;
+                if ((pressed & PAD_DOWN) && char_cur + 3 < NCLS) char_cur += 3;
+                if ((pressed & PAD_UP) && char_cur >= 3) char_cur -= 3;
                 if (pressed & PAD_CROSS) { player_cls = char_cur; pick_flash = 70; }
                 if (pressed & PAD_START) { player_cls = char_cur; reset_game(); state = S_PLAY; }
                 if (pressed & PAD_CIRCLE) tab = 0;
@@ -1465,7 +1556,11 @@ int main(void) {
             if (pressed & PAD_START) { state = S_PAUSE; menu_sel = 0; }
             else {
                 update(&pad, btns, prev);
-                if (winner >= 0 || dead_timer > 120) { state = S_OVER; menu_sel = 0; }
+                if (winner >= 0 || dead_timer > 120) {
+                    if (winner == 0) cls_wins[player_cls]++;
+                    if (actors[0].kills > cls_best[player_cls]) cls_best[player_cls] = actors[0].kills;
+                    state = S_OVER; menu_sel = 0;
+                }
             }
             render();
             break;
