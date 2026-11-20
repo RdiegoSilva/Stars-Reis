@@ -1,7 +1,7 @@
-// PS2 Showdown - battle royale estilo "arena colorida" (top-down, 10 jogadores)
+// Arena Reis - battle royale estilo "arena colorida" (top-down, 10 jogadores)
 // PS2SDK + gsKit + libpad. Personagens e nomes sao originais.
 //
-// Menu: CIMA/BAIXO navega | X confirma | ESQ/DIR troca a classe | START pausa
+// Menu: L1/R1 troca de aba (JOGAR / PERSONAGENS / COMO JOGAR) | ESQ/DIR navega | X confirma | START pausa
 // Jogo:
 //   Analogico esquerdo : mover (com inercia)
 //   Analogico direito  : mirar   |   R1: atirar
@@ -33,14 +33,15 @@
 #define R 12.0f
 #define PI 3.14159265f
 #define ZONE_START 1300.0f
-#define NCLS 4
+#define NCLS 5
+#define INVIS_FRAMES 420                      // ninja: 7 segundos a 60 quadros
 
 enum { WALL = 0, CRATE = 1, BUSH = 2, WATER = 3, ROCK = 4 };
-enum { S_TITLE = 0, S_HELP, S_PLAY, S_PAUSE, S_OVER };
+enum { S_TITLE = 0, S_PLAY, S_PAUSE, S_OVER };
 
 typedef struct {
     float x, y, vx, vy, aim, face, hp, ammo, super, cd, recoil, aimd;
-    int alive, cls, cubes, aiming, place, kills, flash, since_hit, strafe_dir, strafe_t;
+    int alive, cls, cubes, invis, aiming, place, kills, flash, since_hit, strafe_dir, strafe_t;
 } Actor;
 typedef struct { float x, y, dx, dy, life, dmg; int owner, active; float tx, ty, t0; int lob; } Bullet;
 typedef struct { float x, y, w, h, hp; int kind; } Block;
@@ -50,7 +51,7 @@ typedef struct { float x, y, vy, life; int val; u64 color; int active; } DmgNum;
 typedef struct { float x, y; int type; } Decor;
 typedef struct { char a[8], b[8]; int ca, cb, gas, ttl; } Feed;
 
-// classes: 0 = Estilhaco (shotgun), 1 = Falcao (sniper), 2 = Muralha (tanque)
+// classes: 0 = Estilhaco (shotgun), 1 = Falcao (sniper), 2 = Muralha (tanque), 3 = Lancador (bomba), 4 = Ninja (invisivel)
 typedef struct {
     int r, g, b;
     float speed, bspeed, life, dmg, spread, base_hp, cd, reload, kb;
@@ -61,9 +62,9 @@ static const ClassDef CLS[NCLS] = {
     { 170,  90, 255, 2.2f, 15.0f, 55, 52, 0.00f,  80, 30, 95, 3.5f, 1 },
     {  60, 200, 120, 2.0f,  9.5f, 18, 28, 0.22f, 170, 20, 80, 1.5f, 2 },
     { 240,  90, 170, 2.2f,  7.0f, 60, 38, 0.00f, 110, 26, 85, 3.0f, 1, 1 },
+    { 100, 120, 195, 2.7f, 11.0f, 30, 24, 0.14f,  90, 12, 65, 1.8f, 2 },   // ninja: rapido, 2 kunais, super = invisivel
 };
-static const char *CLS_NAME[NCLS] = { "ESTILHACO", "FALCAO", "MURALHA", "LANCADOR" };
-static const char *CLS_DESC[NCLS] = { "3 PROJETEIS. SUPER: ANEL DE TIROS", "TIRO FORTE. SUPER: LEQUE DE 5 TIROS", "MUITA VIDA. SUPER: ONDA DE CHOQUE", "BOMBAS EM ARCO. SUPER: CHUVA DE BOMBAS" };
+static const char *CLS_NAME[NCLS] = { "ESTILHACO", "FALCAO", "MURALHA", "LANCADOR", "NINJA" };
 
 static Actor actors[N_ACTORS];            // actors[0] = jogador
 static Bullet bullets[MAX_BULLETS];
@@ -78,6 +79,7 @@ static char names[N_ACTORS][8];
 static float spx[N_ACTORS], spy[N_ACTORS];
 static int n_blocks, frame_count, winner, player_cls = 0;
 static int state = S_TITLE, menu_sel = 0, anim = 0, dead_timer = 0, tz = 60;
+static int tab = 0, char_cur = 0, pick_flash = 0;      // menu principal: aba atual, cursor de personagem, aviso "escolhido"
 static float zone_r, zone_from, shake;
 
 static char padBuf[256] __attribute__((aligned(64)));
@@ -366,6 +368,10 @@ static void use_super(int who) {
             fire(who, a->aim + k * 0.22f, 1.0f);
         }
         a->aimd = base;
+    } else if (a->cls == 4) {                                  // ninja: invisivel por 7 segundos
+        a->invis = INVIS_FRAMES;
+        burst(a->x, a->y, 26, RGBA(120, 130, 170), 3.5f, 5);
+        burst(a->x, a->y, 10, RGBA(255, 255, 255), 2.5f, 3);
     } else {
         for (int j = 0; j < N_ACTORS; j++) {
             if (j == who || !actors[j].alive) continue;
@@ -389,6 +395,7 @@ static int nearest_enemy(int who, float maxd, int need_visible) {
         if (j == who || !actors[j].alive) continue;
         float d = dist(actors[who].x, actors[who].y, actors[j].x, actors[j].y);
         if (need_visible && d > 90 && in_bush(actors[j].x, actors[j].y)) continue;
+        if (actors[j].invis > 0 && d > 70) continue;                       // ninja invisivel so e visto de perto
         if (d < bd) { bd = d; best = j; }
     }
     return best;
@@ -481,7 +488,7 @@ static void update_bots(void) {
         if (mag > 0.01f) {
             float a = steer(b, atan2f(mvy, mvx));
             float m = sqrtf(mvx * mvx + mvy * mvy); if (m > 1) m = 1;
-            accel_move(b, cosf(a) * m, sinf(a) * m, c->speed * 0.62f);
+            accel_move(b, cosf(a) * m, sinf(a) * m, c->speed * 0.62f * (b->invis > 0 ? 1.2f : 1.0f));
             if (!has_aim) aim_t = a;
         } else accel_move(b, 0, 0, 0);
         b->aim = angle_lerp(b->aim, aim_t, 0.16f);
@@ -509,7 +516,7 @@ static void update(struct padButtonStatus *pad, u32 btns, u32 prev) {
         float rx = ((int)pad->rjoy_h - 128) / 128.0f, ry = ((int)pad->rjoy_v - 128) / 128.0f;
         float lm = sqrtf(lx * lx + ly * ly);
         if (lm > 0.2f) { float s = (lm - 0.2f) / 0.8f; if (s > 1) s = 1; lx = lx / lm * s; ly = ly / lm * s; } else { lx = 0; ly = 0; }
-        accel_move(p, lx, ly, c->speed * (p->aiming ? 0.75f : 1.0f));
+        accel_move(p, lx, ly, c->speed * (p->aiming ? 0.75f : 1.0f) * (p->invis > 0 ? 1.2f : 1.0f));
         float rm = sqrtf(rx * rx + ry * ry), rng = c->bspeed * c->life;
         if (rm > 0.35f) {                                              // analogico direito so mira
             p->aim = atan2f(ry, rx); p->aiming = 1;
@@ -530,13 +537,14 @@ static void update(struct padButtonStatus *pad, u32 btns, u32 prev) {
         if (a->cd > 0) a->cd--;
         if (a->ammo < 3) a->ammo = clampf(a->ammo + 1.0f / CLS[a->cls].reload, 0, 3);
         if (a->flash > 0) a->flash--;
+        if (a->invis > 0 && --a->invis == 0) burst(a->x, a->y, 14, RGBA(120, 130, 170), 2.5f, 4);   // fumaca ao reaparecer
         if (a->recoil > 0) a->recoil *= 0.8f;
         a->since_hit++;
         float spd = sqrtf(a->vx * a->vx + a->vy * a->vy);
         float target = (a->aiming || (i != 0 && spd < 0.3f)) ? a->aim : (spd > 0.3f ? atan2f(a->vy, a->vx) : a->face);
         if (i != 0 && !a->aiming) target = a->aim;
         a->face = angle_lerp(a->face, target, 0.2f);
-        if (spd > 1.2f && (frame_count + i) % 7 == 0)
+        if (spd > 1.2f && a->invis <= 0 && (frame_count + i) % 7 == 0)
             spawn_part(a->x - a->vx * 2, a->y + 8, frand(-0.3f, 0.3f), frand(-0.3f, 0.1f), 16, 3, RGBA(196, 160, 96));
         if (dist(a->x, a->y, WORLD / 2, WORLD / 2) > zone_r) {
             a->hp -= gas_dmg; a->since_hit = 0;
@@ -717,10 +725,11 @@ static void bar(int x, int y, int w, int h, float f, u64 fill, u64 hi, int z) {
 }
 
 // ---------- personagens humanos ----------
-static const int SKIN_C[NCLS][3] = { { 255, 206, 160 }, { 242, 192, 152 }, { 196, 140, 98 }, { 236, 182, 140 } };
-static const int HAIR_C[NCLS][3] = { { 214, 74, 30 }, { 76, 44, 130 }, { 44, 32, 26 }, { 34, 38, 74 } };
+static const int SKIN_C[NCLS][3] = { { 255, 206, 160 }, { 242, 192, 152 }, { 196, 140, 98 }, { 236, 182, 140 }, { 240, 196, 150 } };
+static const int HAIR_C[NCLS][3] = { { 214, 74, 30 }, { 76, 44, 130 }, { 44, 32, 26 }, { 34, 38, 74 }, { 40, 46, 78 } };
 
 static int visible_to(const Actor *a, int i, const Actor *p) {
+    if (i != 0 && a->invis > 0 && dist(a->x, a->y, p->x, p->y) > 70) return 0;      // ninja invisivel
     return !(i != 0 && in_bush(a->x, a->y) && dist(a->x, a->y, p->x, p->y) > 90);
 }
 
@@ -728,8 +737,10 @@ static void draw_human(float sx, float sy, int cls, float face, float aim, float
                        int moving, int flash, float recoil, int me) {
     u64 skin = RGBA(SKIN_C[cls][0], SKIN_C[cls][1], SKIN_C[cls][2]);
     u64 hair = RGBA(HAIR_C[cls][0], HAIR_C[cls][1], HAIR_C[cls][2]);
-    u64 body = flash ? RGBA(255, 255, 255) : ccol(cls, 0);
+    u64 body = flash == 1 ? RGBA(255, 255, 255) : ccol(cls, 0);
     u64 dark = ccol(cls, -70);
+    u64 red = RGBA(226, 48, 64);
+    if (flash == 2) { skin = hair = body = RGBA(160, 200, 240); dark = RGBA(110, 150, 210); red = RGBA(205, 230, 255); }   // fantasma (invisivel)
     u64 ink = RGBA(20, 18, 44);
     u64 white = RGBA(255, 255, 255);
     float sw = moving ? sinf(walk) * 3.5f : 0;
@@ -750,6 +761,7 @@ static void draw_human(float sx, float sy, int cls, float face, float aim, float
     rect(sx - 8, by - 7, sx + 8, by + 7, body, 17);
     rect(sx - 8, by + 3, sx + 8, by + 7, dark, 18);
     rect(sx - 6, by - 6, sx - 2, by - 3, ccol(cls, 60), 18);
+    if (cls == 4) rect(sx - 8, by + 1, sx + 8, by + 3.5f, red, 19);          // faixa do ninja
 
     // braco que segura a arma (aponta para a mira) e braco solto
     float sh = cosf(aim) >= 0 ? 1.0f : -1.0f;
@@ -760,8 +772,8 @@ static void draw_human(float sx, float sy, int cls, float face, float aim, float
     fcircle(hx, hy, 3.0f, skin, gz);
     for (int d = 5; d <= 17; d += 4) {
         float g = d - recoil * 0.5f;
-        float gr = cls == 3 ? (d == 17 ? 3.4f : 3.8f) : (d == 17 ? 2.0f : 2.6f);       // lancador: tubo grosso
-        u64 gc = d == 17 ? (cls == 3 ? RGBA(255, 150, 50) : RGBA(120, 122, 140)) : RGBA(60, 62, 78);
+        float gr = cls == 3 ? (d == 17 ? 3.4f : 3.8f) : (cls == 4 ? (d == 17 ? 1.6f : 1.9f) : (d == 17 ? 2.0f : 2.6f));       // lancador: tubo grosso
+        u64 gc = d == 17 ? (cls == 3 ? RGBA(255, 150, 50) : (cls == 4 ? RGBA(215, 225, 245) : RGBA(120, 122, 140))) : RGBA(60, 62, 78);
         fcircle(hx + cosf(aim) * g, hy + sinf(aim) * g, gr, gc, gz);
     }
     fcircle(sx - sh * 9, by + 1, 3.4f, body, 18);
@@ -793,10 +805,16 @@ static void draw_human(float sx, float sy, int cls, float face, float aim, float
         rect(sx - 6.8f, hy2 - 3, sx + 6.8f, hy2 - 1, body, 21);               // faixa
     } else if (cls == 2) {
         rect(sx - 7, hy2 - 1, sx + 7, hy2 + 0.5f, ccol(2, 70), 21);           // aba do capacete
-    } else {
+    } else if (cls == 3) {
         rect(sx - 7.5f, hy2 - 4, sx + 7.5f, hy2 - 1.5f, RGBA(40, 40, 60), 22); // oculos de lancador
         fcircle(sx - 3.5f, hy2 - 2.7f, 2.7f, RGBA(255, 220, 60), 22);
         fcircle(sx + 3.5f, hy2 - 2.7f, 2.7f, RGBA(255, 220, 60), 22);
+    } else {                                                                 // ninja: capuz, mascara e faixa vermelha
+        float wag = sinf(anim * 0.25f) * 2.0f, bx = -cosf(face) * 7.0f;
+        gsKit_prim_triangle(gs, sx + bx, hy2 - 3, sx + bx * 2.0f, hy2 - 6 + wag, sx + bx * 1.9f, hy2 - 1 + wag, 18, red);
+        gsKit_prim_triangle(gs, sx + bx, hy2 - 2, sx + bx * 1.8f, hy2 + 1 - wag, sx + bx * 1.5f, hy2 + 3 - wag, 18, red);
+        if (!back) rect(sx - 4.6f, hy2 + 4.4f, sx + 4.6f, hy2 + 7, hair, 22);   // mascara
+        rect(sx - 7, hy2 - 3, sx + 7, hy2 - 0.8f, red, 22);                     // faixa
     }
 }
 
@@ -938,8 +956,10 @@ static void render_world(float ox, float oy, const Actor *p) {
         const Actor *a = &actors[i];
         if (!a->alive || !visible_to(a, i, p)) continue;
         float spd = sqrtf(a->vx * a->vx + a->vy * a->vy);
+        int look = a->flash > 0 ? 1 : 0;
+        if (!look && a->invis > 0 && !(a->invis < 120 && (anim / 6) % 2)) look = 2;      // fantasma; pisca nos ultimos 2s
         draw_human(a->x + ox, a->y + oy, a->cls, a->face, a->aim, frame_count * 0.45f + i * 1.7f,
-                   spd > 0.6f, a->flash > 0, a->recoil, i == 0);
+                   spd > 0.6f, look, a->recoil, i == 0);
     }
     // arbustos por cima
     for (int i = 0; i < n_blocks; i++) {
@@ -1000,6 +1020,10 @@ static void draw_portrait(float x, float y, float sz, int cls, u64 border) {
     fcircle(cx, cy - sz * 0.17f, sz * 0.17f, cls == 2 ? ccol(2, -30) : hair, 44);
     fcircle(cx - sz * 0.09f, cy + sz * 0.08f, sz * 0.05f, RGBA(20, 18, 44), 45);
     fcircle(cx + sz * 0.09f, cy + sz * 0.08f, sz * 0.05f, RGBA(20, 18, 44), 45);
+    if (cls == 4) {                                                          // ninja: mascara e faixa
+        fcircle(cx, cy + sz * 0.22f, sz * 0.14f, hair, 46);
+        rect(cx - sz * 0.26f, cy - sz * 0.12f, cx + sz * 0.26f, cy - sz * 0.05f, RGBA(226, 48, 64), 46);
+    }
 }
 
 static void render_hud(const Actor *p) {
@@ -1068,6 +1092,12 @@ static void render_hud(const Actor *p) {
         text_sh((int)(bx - text_w("L1", 1) / 2.0f), SCR_H - 30, 1, RGBA(255, 255, 255), "L1");
     }
 
+    if (p->alive && p->invis > 0) {                                            // tempo de invisibilidade
+        snprintf(buf, sizeof(buf), "INVISIVEL %d", p->invis / 60 + 1);
+        ctext(344, 2, RGBA(150, 220, 255), buf);
+        bar(SCR_W / 2 - 60, 366, 120, 8, p->invis / (float)INVIS_FRAMES, RGBA(120, 190, 255), RGBA(200, 235, 255), 38);
+    }
+
     // avisos da zona
     if (frame_count < 600) { snprintf(buf, sizeof(buf), "ZONA FECHA EM %d", (600 - frame_count) / 60 + 1); if (frame_count > 300) ctext(22, 2, RGBA(255, 255, 255), buf); }
     else {
@@ -1116,62 +1146,262 @@ static void nav(u32 pressed, int count) {
     if (pressed & PAD_DOWN) menu_sel = (menu_sel + 1) % count;
 }
 
-static void render_bg_checker(void) {
-    int off = (anim / 2) % 128;
+// ---------- menu principal "ARENA REIS" (abas: JOGAR | PERSONAGENS | COMO JOGAR) ----------
+// camadas (z): fundo 1-4 | barras 6-7 | paineis 7-12 | personagem 13-22 | widgets 24-34 | retratos 39-45 | texto 49-50
+static const char *TAB_NAME[3] = { "JOGAR", "PERSONAGENS", "COMO JOGAR" };
+static const char *CLS_ROLE[NCLS] = { "CURTO ALCANCE", "ATIRADOR", "TANQUE", "ARTILHEIRO", "ASSASSINO" };
+static const char *CLS_ATK[NCLS]  = { "3 PROJETEIS CURTOS", "1 TIRO FORTE LONGO", "TANQUE 2 PROJETEIS", "BOMBA EM ARCO AREA", "2 KUNAIS RAPIDOS" };
+static const char *CLS_SUP[NCLS]  = { "ANEL DE TIROS", "LEQUE DE 5 TIROS", "ONDA DE CHOQUE", "CHUVA DE BOMBAS", "INVISIVEL POR 7S" };
+
+#define GOLD     RGBA(255, 210, 63)
+#define GOLD_HI  RGBA(255, 236, 130)
+#define GOLD_LO  RGBA(226, 160, 20)
+#define GOLD_INK RGBA(58, 26, 0)
+#define MUTED    RGBA(185, 180, 230)
+#define NAVY_EDGE RGBA(90, 80, 170)
+#define NAVY_FILL RGBA(26, 24, 70)
+
+static int lerpi(int a, int b, float t) { return (int)(a + (b - a) * t + 0.5f); }
+static u64 bg_col(float y, int add) {                     // degrade vertical roxo -> azul escuro
+    float t = clampf(y / SCR_H, 0, 1);
+    return RGBA(lerpi(44, 14, t) + add, lerpi(26, 18, t) + add, lerpi(104, 48, t) + add * 2);
+}
+static u64 tint(int cls, float k) {                       // cor da classe misturada com o azul do menu
+    return RGBA(lerpi(24, CLS[cls].r, k), lerpi(22, CLS[cls].g, k), lerpi(60, CLS[cls].b, k));
+}
+
+static void render_bg(void) {
+    gsKit_clear(gs, RGBA(14, 16, 46));
+    for (int i = 0; i < 16; i++) rect(0, i * 28, SCR_W, i * 28 + 28, bg_col(i * 28 + 14, 0), 1);
+    int off = (anim / 3) % 128;
     for (int gx = -128; gx < SCR_W; gx += 64)
         for (int gy = -128; gy < SCR_H; gy += 64)
-            if ((((gx + 128) / 64) + ((gy + 128) / 64)) % 2 == 0)
-                rect(gx + off, gy + off, gx + off + 64, gy + off + 64, RGBA(31, 28, 78), 1);
+            if ((((gx + 128) / 64) + ((gy + 128) / 64)) % 2 == 0) {
+                float x = gx + off, y = gy + off;
+                rect(x, y, x + 64, y + 64, bg_col(y + 32, 10), 2);
+            }
+    for (int i = 0; i < 18; i++) {                        // faiscas douradas subindo
+        float sp = 0.35f + (i % 5) * 0.14f;
+        float y = SCR_H + 10 - fmodf(anim * sp + i * 61.0f, SCR_H + 20.0f);
+        float x = fmodf(i * 83.0f + 17.0f, (float)SCR_W) + sinf(anim * 0.03f + i) * 10.0f;
+        int s = 2 + i % 3;
+        u64 c = (i % 3 == 0) ? RGBA(255, 210, 63) : (i % 3 == 1 ? RGBA(120, 100, 200) : RGBA(53, 201, 245));
+        rect(x, y, x + s * 2, y + s * 2, c, 4);
+    }
+}
+
+static void crown_shape(float cx, float cy, float s, u64 c, int z) {
+    float yb = cy - 0.35f * s;
+    rect(cx - s, yb, cx + s, cy, c, z);
+    gsKit_prim_triangle(gs, cx - s, yb + 1, cx - 0.2f * s, yb + 1, cx - 0.9f * s, cy - 1.0f * s, z, c);
+    gsKit_prim_triangle(gs, cx - 0.55f * s, yb + 1, cx + 0.55f * s, yb + 1, cx, cy - 1.3f * s, z, c);
+    gsKit_prim_triangle(gs, cx + 0.2f * s, yb + 1, cx + s, yb + 1, cx + 0.9f * s, cy - 1.0f * s, z, c);
+}
+// coroa dourada; (cx, cy) = centro da base. Usa z .. z+3
+static void draw_crown(float cx, float cy, float s, int z) {
+    crown_shape(cx, cy + 0.08f * s, s * 1.12f, RGBA(40, 24, 10), z);
+    crown_shape(cx, cy, s, RGBA(255, 200, 40), z + 1);
+    rect(cx - s, cy - 0.35f * s, cx + s, cy - 0.25f * s, GOLD_HI, z + 2);
+    rect(cx - s, cy - 0.16f * s, cx + s, cy, GOLD_LO, z + 2);
+    fcircle(cx, cy - 0.2f * s, 0.12f * s, RGBA(230, 50, 70), z + 3);
+    fcircle(cx - 0.6f * s, cy - 0.2f * s, 0.09f * s, RGBA(53, 201, 245), z + 3);
+    fcircle(cx + 0.6f * s, cy - 0.2f * s, 0.09f * s, RGBA(53, 201, 245), z + 3);
+    fcircle(cx - 0.9f * s, cy - 1.0f * s, 0.10f * s, RGBA(255, 255, 255), z + 2);
+    fcircle(cx, cy - 1.3f * s, 0.12f * s, RGBA(255, 255, 255), z + 2);
+    fcircle(cx + 0.9f * s, cy - 1.0f * s, 0.10f * s, RGBA(255, 255, 255), z + 2);
+}
+
+// titulo grande com contorno e sombra
+static void title_text(int x, int y, int sc, u64 col, const char *s) {
+    int o = sc / 2;
+    u64 ink = RGBA(10, 8, 30);
+    draw_text(x + o, y + o * 2, sc, ink, 46, s);
+    draw_text(x - o, y, sc, ink, 47, s);
+    draw_text(x + o, y, sc, ink, 47, s);
+    draw_text(x, y - o, sc, ink, 47, s);
+    draw_text(x, y + o, sc, ink, 47, s);
+    draw_text(x, y, sc, col, 50, s);
+}
+
+static void panel(int x1, int y1, int x2, int y2, u64 border, u64 fill, int z) {
+    rect(x1 + 4, y1 + 5, x2 + 4, y2 + 5, RGBA(8, 6, 24), z - 1);          // sombra
+    rect(x1, y1, x2, y2, border, z);
+    rect(x1 + 3, y1 + 3, x2 - 3, y2 - 3, fill, z + 1);
+}
+static void pill(int x, int y, int w, int h, u64 edge, u64 fill, int z) {
+    rect(x, y, x + w, y + h, edge, z);
+    rect(x + 2, y + 2, x + w - 2, y + h - 2, fill, z + 1);
+}
+
+static void render_tabs(void) {
+    rect(0, 0, SCR_W, 44, RGBA(12, 10, 36), 6);
+    rect(0, 44, SCR_W, 47, GOLD, 7);
+    int gap = 8, pad = 14, w[3], total = -gap;
+    for (int i = 0; i < 3; i++) { w[i] = text_w(TAB_NAME[i], 2) + pad * 2; total += w[i] + gap; }
+    int x = (SCR_W - total) / 2;
+    pill(x - 46, 11, 34, 24, RGBA(150, 146, 210), RGBA(50, 46, 110), 8);
+    draw_text(x - 46 + 6, 17, 2, RGBA(255, 255, 255), 50, "L1");
+    pill(x + total + 12, 11, 34, 24, RGBA(150, 146, 210), RGBA(50, 46, 110), 8);
+    draw_text(x + total + 12 + 6, 17, 2, RGBA(255, 255, 255), 50, "R1");
+    for (int i = 0; i < 3; i++) {
+        if (i == tab) {
+            rect(x, 5, x + w[i], 44, RGBA(10, 8, 30), 10);
+            rect(x + 2, 7, x + w[i] - 2, 44, GOLD, 11);
+            rect(x + 2, 7, x + w[i] - 2, 14, GOLD_HI, 12);
+            draw_text(x + pad, 16, 2, GOLD_INK, 50, TAB_NAME[i]);
+        } else {
+            rect(x, 11, x + w[i], 44, RGBA(70, 64, 140), 10);
+            rect(x + 2, 13, x + w[i] - 2, 44, RGBA(30, 28, 78), 11);
+            draw_text(x + pad, 20, 2, MUTED, 50, TAB_NAME[i]);
+        }
+        x += w[i] + gap;
+    }
+}
+
+static void render_footer(const char *hint) {
+    rect(0, 408, SCR_W, SCR_H, RGBA(12, 10, 36), 6);
+    rect(0, 405, SCR_W, 408, GOLD, 7);
+    ctext(420, 2, MUTED, hint);
+}
+
+static void stat_row(int x, int y, const char *label, float f, u64 fill, u64 hi) {
+    text_sh(x, y, 2, RGBA(255, 255, 255), label);
+    bar(x + 90, y + 2, 76, 10, clampf(f, 0.08f, 1.0f), fill, hi, 24);
+}
+
+static void pedestal(float cx, float cy, float rx) {
+    fellipse(cx, cy + 3, rx + 3, rx * 0.30f + 3, RGBA(8, 6, 24), 8);
+    fellipse(cx, cy, rx, rx * 0.30f, GOLD, 9);
+    fellipse(cx, cy, rx - 5, rx * 0.30f - 2, RGBA(72, 52, 150), 10);
+}
+static void preview_human(float cx, float cy, int cls) {
+    float a = anim * 0.03f;
+    pedestal(cx, cy + 22, 38);
+    draw_human(cx, cy, cls, a, a, anim * 0.25f, 1, 0, 0, 0);
+}
+
+static void render_tab_play(void) {
+    char buf[48];
+    fellipse(SCR_W / 2, 128, 250, 86, bg_col(128, 24), 3);                  // holofote atras do titulo
+    int bob = (int)(sinf(anim * 0.06f) * 3.0f);
+    draw_crown(SCR_W / 2, 98 + bob, 24, 20);
+    title_text(143, 108, 6, GOLD, "ARENA");
+    title_text(359, 108, 6, RGBA(53, 201, 245), "REIS");
+    ctext(162, 2, MUTED, "BATTLE ROYALE 2D");
+    rect(120, 168, 213, 170, GOLD, 12);
+    rect(427, 168, 520, 170, GOLD, 12);
+
+    int pulse = (int)(sinf(anim * 0.1f) * 4.0f);                           // botao JOGAR
+    int bx1 = 180 - pulse, bx2 = 460 + pulse, by1 = 192, by2 = 244;
+    rect(bx1 + 4, by1 + 6, bx2 + 4, by2 + 6, RGBA(8, 6, 24), 7);
+    rect(bx1, by1, bx2, by2, GOLD_INK, 8);
+    rect(bx1 + 3, by1 + 3, bx2 - 3, by2 - 3, GOLD, 9);
+    rect(bx1 + 3, by1 + 3, bx2 - 3, by1 + 16, GOLD_HI, 10);
+    rect(bx1 + 3, by2 - 12, bx2 - 3, by2 - 3, GOLD_LO, 10);
+    gsKit_prim_triangle(gs, bx1 + 30, by1 + 14, bx1 + 30, by2 - 14, bx1 + 54, (by1 + by2) / 2, 11, GOLD_INK);
+    draw_text((SCR_W - text_w("JOGAR", 4)) / 2 + 14, by1 + 13, 4, GOLD_INK, 50, "JOGAR");
+    ctext(254, 2, RGBA(255, 232, 120), "X OU START");
+
+    panel(90, 282, 550, 392, NAVY_EDGE, NAVY_FILL, 7);                      // personagem atual
+    draw_portrait(104, 296, 86, player_cls, GOLD);
+    text_sh(206, 294, 1, MUTED, "SEU PERSONAGEM");
+    text_sh(206, 308, 3, ccol(player_cls, 30), CLS_NAME[player_cls]);
+    snprintf(buf, sizeof(buf), "ATAQUE: %s", CLS_ATK[player_cls]);
+    text_sh(206, 338, 1, RGBA(255, 255, 255), buf);
+    snprintf(buf, sizeof(buf), "SUPER: %s", CLS_SUP[player_cls]);
+    text_sh(206, 352, 1, RGBA(255, 255, 255), buf);
+    text_sh(206, 372, 1, GOLD, "L1 R1: ABA PERSONAGENS");
+    preview_human(500, 338, player_cls);
+}
+
+static void render_tab_chars(void) {
+    if (pick_flash > 0) ctext(50, 3, RGBA(110, 255, 150), "PERSONAGEM ESCOLHIDO!");
+    else ctext(50, 3, GOLD, "ESCOLHA SEU PERSONAGEM");
+
+    for (int i = 0; i < NCLS; i++) {                                        // cartas
+        int sel = (i == char_cur), eq = (i == player_cls);
+        int x0 = 23 + i * 120, y0 = sel ? 88 : 96, y1 = y0 + 166;
+        u64 edge = sel ? ((anim / 8) % 2 ? GOLD : GOLD_HI) : RGBA(70, 64, 140);
+        panel(x0, y0, x0 + 114, y1, edge, tint(i, sel ? 0.38f : 0.20f), 7);
+        rect(x0 + 3, y0 + 3, x0 + 111, y0 + 9, ccol(i, sel ? 20 : -40), 9);
+        draw_portrait(x0 + 20, y0 + 14, 74, i, ccol(i, 40));
+        int nw = text_w(CLS_NAME[i], 2);
+        text_sh(x0 + 57 - nw / 2, y0 + 98, 2, RGBA(255, 255, 255), CLS_NAME[i]);
+        text_sh(x0 + 57 - text_w(CLS_ROLE[i], 1) / 2, y0 + 118, 1, ccol(i, 70), CLS_ROLE[i]);
+        if (eq) {
+            pill(x0 + 8, y0 + 134, 98, 22, RGBA(20, 100, 50), RGBA(70, 226, 100), 10);
+            draw_text(x0 + 57 - text_w("EM USO", 2) / 2, y0 + 138, 2, RGBA(10, 50, 24), 50, "EM USO");
+            draw_crown(x0 + 57, y0 + 4, 13, 28);
+        } else if (sel && (anim / 20) % 2 == 0) {
+            pill(x0 + 8, y0 + 134, 98, 22, GOLD_INK, GOLD, 10);
+            draw_text(x0 + 57 - text_w("X: ESCOLHER", 1) / 2, y0 + 142, 1, GOLD_INK, 50, "X: ESCOLHER");
+        }
+    }
+
+    const ClassDef *c = &CLS[char_cur];                                     // detalhes
+    panel(42, 274, 598, 398, NAVY_EDGE, NAVY_FILL, 7);
+    preview_human(108, 340, char_cur);
+    rect(172, 284, 174, 388, NAVY_EDGE, 9);
+    stat_row(184, 288, "VIDA",    c->base_hp / 170.0f,                   RGBA(70, 226, 100), RGBA(160, 255, 170));
+    stat_row(184, 316, "DANO",    c->dmg * c->pellets / 60.0f,           RGBA(255, 74, 90),  RGBA(255, 150, 150));
+    stat_row(184, 344, "VELOC",   c->speed / 2.7f,                       RGBA(53, 201, 245), RGBA(150, 230, 255));
+    stat_row(184, 372, "ALCANCE", sqrtf(c->bspeed * c->life / 825.0f),   RGBA(255, 190, 40), GOLD_HI);
+    rect(362, 284, 364, 388, NAVY_EDGE, 9);
+    text_sh(376, 284, 3, ccol(char_cur, 30), CLS_NAME[char_cur]);
+    text_sh(376, 316, 1, GOLD, "ATAQUE");
+    text_sh(376, 328, 2, RGBA(255, 255, 255), CLS_ATK[char_cur]);
+    text_sh(376, 354, 1, GOLD, "SUPER");
+    text_sh(376, 366, 2, RGBA(255, 255, 255), CLS_SUP[char_cur]);
+}
+
+static void render_tab_help(void) {
+    static const char *keys[5]  = { "ESQ", "DIR", "R1", "L1", "START" };
+    static const char *descs[5] = { "MOVER COM INERCIA", "MIRAR. SOLTAR NAO ATIRA", "ATIRAR. SEGURE REPETE",
+                                    "SUPER QUANDO AMARELO", "PAUSA" };
+    static const char *tips[5]  = { "QUEBRE CAIXAS: CUBOS DE PODER", "ARBUSTOS ESCONDEM VOCE", "AGUA BLOQUEIA O PASSO",
+                                    "FUJA DO GAS E VIRE O REI!", "LANCADOR: EMPURRE DIR PARA LONGE" };
+    panel(40, 56, 600, 398, NAVY_EDGE, NAVY_FILL, 7);
+    text_sh(64, 66, 2, GOLD, "CONTROLES");
+    rect(64, 84, 576, 86, NAVY_EDGE, 9);
+    for (int i = 0; i < 5; i++) {
+        int y = 94 + i * 28;
+        pill(64, y, 90, 22, GOLD_INK, GOLD, 9);
+        draw_text(64 + (90 - text_w(keys[i], 2)) / 2, y + 4, 2, GOLD_INK, 50, keys[i]);
+        text_sh(172, y + 4, 2, RGBA(255, 255, 255), descs[i]);
+    }
+    text_sh(64, 242, 2, GOLD, "DICAS");
+    rect(64, 260, 576, 262, NAVY_EDGE, 9);
+    for (int i = 0; i < 5; i++) {
+        int y = 272 + i * 24;
+        rect(68, y + 3, 76, y + 11, i % 2 ? RGBA(53, 201, 245) : GOLD, 9);
+        text_sh(90, y, 2, RGBA(255, 255, 255), tips[i]);
+    }
 }
 
 static void render_title(void) {
-    char cls_line[48];
-    gsKit_clear(gs, RGBA(22, 20, 58));
-    render_bg_checker();
-    int bob = (int)(sinf(anim * 0.06f) * 5.0f);
-    ctext(40 + bob, 7, RGBA(255, 210, 63), "SHOWDOWN");
-    ctext(104 + bob, 4, RGBA(53, 201, 245), "ARENA");
-
-    snprintf(cls_line, sizeof(cls_line), "CLASSE: < %s >", CLS_NAME[player_cls]);
-    const char *items[3] = { "JOGAR", cls_line, "COMO JOGAR" };
-    draw_items(170, 3, items, 3, menu_sel);
-
-    for (int i = 0; i < NCLS; i++) {                      // previa das classes
-        float cx = SCR_W / 2 + (i - 1.5f) * 90, cy = 340;
-        int sel = (i == player_cls);
-        fcircle(cx, cy, sel ? 26 : 18, sel ? RGBA(255, 255, 255) : RGBA(10, 8, 30), 17);
-        fcircle(cx, cy, sel ? 22 : 15, ccol(i, 0), 18);
-        fcircle(cx + 5, cy - 3, sel ? 5 : 3, RGBA(255, 255, 255), 19);
+    tz = 50;
+    render_bg();
+    render_tabs();
+    if (tab == 0) {
+        render_tab_play();
+        render_footer("X: JOGAR   < >: TROCAR   L1 R1: ABAS");
+    } else if (tab == 1) {
+        render_tab_chars();
+        render_footer("< >: VER   X: ESCOLHER   START: JOGAR");
+    } else {
+        render_tab_help();
+        render_footer("L1 R1: ABAS   X: VOLTAR");
     }
-    ctext(382, 2, RGBA(185, 180, 230), CLS_DESC[player_cls]);
-    ctext(420, 2, RGBA(185, 180, 230), "CIMA BAIXO: NAVEGAR   X: ESCOLHER");
-}
-
-static void render_help(void) {
-    static const char *lines[] = {
-        "ANALOGICO ESQ: MOVER (COM INERCIA)",
-        "ANALOGICO DIR: MIRAR (SO MIRA, NAO ATIRA)",
-        "R1: ATIRAR (SEGURE PARA REPETIR)",
-        "L1: SUPER QUANDO O BOTAO ESTIVER AMARELO",
-        "START: PAUSA",
-        "QUEBRE CAIXAS PARA PEGAR CUBOS DE PODER",
-        "ARBUSTOS ESCONDEM VOCE. AGUA BLOQUEIA O PASSO",
-        "VIDA E MUNICAO FICAM EM CIMA DO PERSONAGEM",
-        "LANCADOR: EMPURRE MAIS O ANALOGICO PARA LANCAR LONGE",
-        "FUJA DO GAS VERDE E SEJA O ULTIMO DE PE",
-    };
-    gsKit_clear(gs, RGBA(22, 20, 58));
-    render_bg_checker();
-    ctext(26, 5, RGBA(255, 210, 63), "COMO JOGAR");
-    for (int i = 0; i < 10; i++) text_sh(40, 100 + i * 29, 2, RGBA(255, 255, 255), lines[i]);
-    ctext(410, 2, RGBA(185, 180, 230), "X: VOLTAR");
+    tz = 60;
 }
 
 static void draw_overlay(const char *title, const char *sub, const char **items, int n) {
-    rect(106, 106, 534, 334, RGBA(255, 210, 63), 50);
+    rect(110, 117, 538, 340, RGBA(8, 6, 24), 49);
+    rect(106, 106, 534, 334, GOLD, 50);
     rect(110, 110, 530, 330, RGBA(30, 27, 76), 51);
-    ctext(124, 4, RGBA(255, 210, 63), title);
-    if (sub) ctext(166, 2, RGBA(185, 180, 230), sub);
+    draw_crown(SCR_W / 2, 112, 14, 53);
+    ctext(124, 4, GOLD, title);
+    if (sub) ctext(166, 2, MUTED, sub);
     draw_items(200, 3, items, n, menu_sel);
 }
 
@@ -1208,23 +1438,28 @@ int main(void) {
         anim++;
 
         switch (state) {
-        case S_TITLE:
-            nav(pressed, 3);
-            if (menu_sel == 1) {
+        case S_TITLE: {
+            int old_tab = tab;
+            if (pressed & PAD_L1) tab = (tab + 2) % 3;
+            if (pressed & PAD_R1) tab = (tab + 1) % 3;
+            if (tab != old_tab) { if (tab == 1) char_cur = player_cls; pick_flash = 0; }
+            if (tab == 0) {                                                  // JOGAR
                 if (pressed & PAD_LEFT) player_cls = (player_cls + NCLS - 1) % NCLS;
-                if (pressed & (PAD_RIGHT | PAD_CROSS)) player_cls = (player_cls + 1) % NCLS;
-            } else if (pressed & PAD_CROSS) {
-                if (menu_sel == 0) { reset_game(); state = S_PLAY; }
-                else if (menu_sel == 2) state = S_HELP;
+                if (pressed & PAD_RIGHT) player_cls = (player_cls + 1) % NCLS;
+                if (pressed & (PAD_CROSS | PAD_START)) { reset_game(); state = S_PLAY; }
+            } else if (tab == 1) {                                           // PERSONAGENS
+                if (pressed & PAD_LEFT) char_cur = (char_cur + NCLS - 1) % NCLS;
+                if (pressed & PAD_RIGHT) char_cur = (char_cur + 1) % NCLS;
+                if (pressed & PAD_CROSS) { player_cls = char_cur; pick_flash = 70; }
+                if (pressed & PAD_START) { player_cls = char_cur; reset_game(); state = S_PLAY; }
+                if (pressed & PAD_CIRCLE) tab = 0;
+            } else {                                                         // COMO JOGAR
+                if (pressed & (PAD_CROSS | PAD_CIRCLE | PAD_START)) tab = 0;
             }
-            if (pressed & PAD_START) { reset_game(); state = S_PLAY; }
+            if (pick_flash > 0) pick_flash--;
             render_title();
             break;
-
-        case S_HELP:
-            if (pressed & (PAD_CROSS | PAD_CIRCLE | PAD_START)) state = S_TITLE;
-            render_help();
-            break;
+        }
 
         case S_PLAY:
             if (pressed & PAD_START) { state = S_PAUSE; menu_sel = 0; }
@@ -1242,7 +1477,7 @@ int main(void) {
             else if (pressed & PAD_CROSS) {
                 if (menu_sel == 0) state = S_PLAY;
                 else if (menu_sel == 1) { reset_game(); state = S_PLAY; }
-                else { state = S_TITLE; menu_sel = 0; }
+                else { state = S_TITLE; tab = 0; menu_sel = 0; }
             }
             render();
             if (state == S_PAUSE) draw_overlay("PAUSA", CLS_NAME[player_cls], items, 3);
@@ -1255,7 +1490,7 @@ int main(void) {
             nav(pressed, 2);
             if (pressed & PAD_CROSS) {
                 if (menu_sel == 0) { reset_game(); state = S_PLAY; }
-                else { state = S_TITLE; menu_sel = 0; }
+                else { state = S_TITLE; tab = 0; menu_sel = 0; }
             }
             render();
             if (state == S_OVER) {

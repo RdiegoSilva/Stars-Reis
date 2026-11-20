@@ -1,4 +1,4 @@
-# PS2 Showdown (prototipo)
+# Arena Reis (prototipo)
 
 Battle royale 2D top-down de 10 jogadores, visual de arena colorida: personagens humanos,
 gas que fecha, caixas que soltam cubos de poder, arbustos para se esconder, municao com
@@ -8,6 +8,13 @@ recarga e super. Personagens e nomes sao originais.
 1. Instale o toolchain: https://github.com/ps2dev/ps2dev (PS2DEV e PS2SDK no ambiente)
 2. `make`
 3. PCSX2: File > Run ELF > battle_royale.elf. Em PS2 real, via uLaunchELF.
+
+## Menu principal (abas)
+- L1 / R1: troca de aba entre JOGAR, PERSONAGENS e COMO JOGAR
+- JOGAR: X ou START inicia; ESQ/DIR troca rapido o personagem
+- PERSONAGENS: ESQ/DIR navega nas cartas (stats de vida, dano, velocidade e alcance),
+  X escolhe (a carta ganha a coroa "EM USO"), START escolhe e ja joga, O volta
+- COMO JOGAR: controles e dicas; X volta
 
 ## Controles
 - Analogico esquerdo: mover (com inercia)
@@ -23,6 +30,10 @@ recarga e super. Personagens e nomes sao originais.
 - Lancador (rosa): bomba lancada em arco que passa por cima de paredes e agua e explode
   em area. Quanto mais voce empurra o analogico direito, mais longe a bomba cai (a mira
   mostra o circulo da explosao). Super: chuva de 5 bombas.
+
+- Ninja (azul-aco): 2 kunais rapidos, o mais veloz. Super: fica invisivel por 7 segundos
+  (+20% de velocidade). Os bots nao enxergam voce a mais de 70 de distancia; voce se ve como
+  um fantasma azul que pisca nos ultimos 2 segundos. Um contador aparece na tela.
 
 ## Tela
 - Sem HUD de barras: vida (com numero), 3 segmentos de municao, nome e cubos ficam
