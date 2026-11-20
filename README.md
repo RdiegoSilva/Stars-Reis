@@ -1,6 +1,6 @@
 # Arena Reis (prototipo)
 
-Battle royale 2D top-down de 10 jogadores, visual de arena colorida: personagens humanos,
+Dois modos: battle royale 2D top-down de 10 jogadores e Fute Reis 3x3. Visual de arena colorida: personagens humanos,
 gas que fecha, caixas que soltam cubos de poder, arbustos para se esconder, municao com
 recarga e super. Personagens e nomes sao originais.
 
@@ -11,7 +11,7 @@ recarga e super. Personagens e nomes sao originais.
 
 ## Menu principal (abas)
 - L1 / R1: troca de aba entre JOGAR, PERSONAGENS e COMO JOGAR
-- JOGAR: X ou START inicia; ESQ/DIR troca rapido o personagem
+- JOGAR: ESQ/DIR escolhe o modo (BATTLE ROYALE ou FUTE REIS 3X3); X ou START inicia
 - PERSONAGENS: grade de cards (3 x 2) em fundo azul. Setas navegam, X escolhe (a carta
   escolhida ganha coroa e o selo "EM USO"), START escolhe e ja joga, O volta.
   Cada card mostra retrato, 4 mini barras (vida, dano, velocidade, alcance), selo roxo com
@@ -19,7 +19,16 @@ recarga e super. Personagens e nomes sao originais.
   O painel de baixo detalha o personagem selecionado. O ultimo espaco e "EM BREVE".
 - COMO JOGAR: controles e dicas; X volta
 
-## Controles
+## Modo Fute Reis 3x3
+- Voce + 2 bots (azul) contra 3 bots (vermelho). Quem fizer 2 gols ganha; a partida dura 2 minutos.
+- Acabou o tempo: vence quem tem mais gols. Empate: gol de ouro (o proximo gol decide).
+- Analogico esquerdo: mover | analogico direito: mirar o chute | R1: chutar (perto da bola)
+  | L1: disparada (recarrega em 2,5 s)
+- Cada classe tem seu estilo: Falcao chuta mais forte, Ninja tem a disparada mais longa e e
+  o mais veloz, Muralha chuta forte e e mais lenta.
+- Seu personagem do menu PERSONAGENS e o que joga. START pausa.
+
+## Controles (battle royale)
 - Analogico esquerdo: mover (com inercia)
 - Analogico direito: so mira (soltar NAO atira). Sem mirar, a arma segue o movimento.
 - R1: atira (segure para repetir enquanto houver municao)
