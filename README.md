@@ -20,12 +20,15 @@ recarga e super. Personagens e nomes sao originais.
 - COMO JOGAR: controles e dicas; X volta
 
 ## Modo Fute Reis 3x3
-- Voce + 2 bots (azul) contra 3 bots (vermelho). Quem fizer 2 gols ganha; a partida dura 2 minutos.
-- Acabou o tempo: vence quem tem mais gols. Empate: gol de ouro (o proximo gol decide).
-- Analogico esquerdo: mover | analogico direito: mirar o chute | R1: chutar (perto da bola)
-  | L1: disparada (recarrega em 2,5 s)
-- Cada classe tem seu estilo: Falcao chuta mais forte, Ninja tem a disparada mais longa e e
-  o mais veloz, Muralha chuta forte e e mais lenta.
+- Arena vertical com gols em cima e embaixo, caixas, barris, cercas e arbustos (simetrica para
+  os dois times). Voce + 2 bots (azul, defende embaixo) contra 3 bots (vermelho).
+- Quem fizer 2 gols ganha; a partida dura 2 minutos. Acabou o tempo: vence quem tem mais gols.
+  Empate: gol de ouro (o proximo gol decide).
+- Armas funcionam: R1 atira, os tiros tiram vida dos rivais (sem fogo amigo) e tambem empurram a
+  bola; bombas do Lancador jogam a bola longe. Quem morre reaparece em 3 segundos.
+- Analogico esquerdo: mover | analogico direito: mirar | R1: atirar | R2 (ou O): chutar a bola
+  (perto dela) | L1: super (carrega com o tempo e com acertos)
+- A bola tambem anda so de encostar nela; se ficar parada por 8 s, volta ao centro.
 - Seu personagem do menu PERSONAGENS e o que joga. START pausa.
 
 ## Controles (battle royale)

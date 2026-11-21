@@ -2,6 +2,7 @@
 // PS2SDK + gsKit + libpad. Personagens e nomes sao originais.
 //
 // Modos: BATTLE ROYALE (10 jogadores) e FUTE REIS 3x3 (2 gols ou 2 minutos)
+// Fute: arena vertical com obstaculos; R1 atira, R2 chuta a bola, L1 super; quem morre volta em 3 s
 // Menu: L1/R1 troca de aba (JOGAR / PERSONAGENS / COMO JOGAR) | ESQ/DIR navega | X confirma | START pausa
 // Jogo:
 //   Analogico esquerdo : mover (com inercia)
@@ -38,12 +39,12 @@
 #define LOB_FUSE 36                           // lancador: a bomba pousa e explode 0.6 s depois (36 quadros)
 #define INVIS_FRAMES 420                      // ninja: 7 segundos a 60 quadros
 
-enum { WALL = 0, CRATE = 1, BUSH = 2, WATER = 3, ROCK = 4 };
+enum { WALL = 0, CRATE = 1, BUSH = 2, WATER = 3, ROCK = 4, FENCE = 5, BARREL = 6 };
 enum { S_TITLE = 0, S_PLAY, S_PAUSE, S_OVER };
 
 typedef struct {
-    float x, y, vx, vy, aim, face, hp, ammo, super, cd, recoil, aimd;
-    int alive, cls, cubes, invis, team, aiming, place, kills, flash, since_hit, strafe_dir, strafe_t;
+    float x, y, vx, vy, aim, face, hp, ammo, super, cd, recoil, aimd, ua;
+    int alive, cls, cubes, invis, team, stuck, aiming, place, kills, flash, since_hit, strafe_dir, strafe_t;
 } Actor;
 typedef struct { float x, y, dx, dy, life, dmg; int owner, active; float tx, ty, t0; int lob; } Bullet;
 typedef struct { float x, y, w, h, hp; int kind; } Block;
@@ -84,6 +85,9 @@ static int state = S_TITLE, menu_sel = 0, anim = 0, dead_timer = 0, tz = 60;
 static int tab = 0, char_cur = 0, pick_flash = 0, bg_blue = 0, game_mode = 0, no_gun = 0;   // game_mode: 0 = batalha, 1 = fute
 static int cls_wins[NCLS], cls_best[NCLS];            // recordes da sessao por classe      // menu principal: aba atual, cursor de personagem, aviso "escolhido"
 static float zone_r, zone_from, shake;
+static float ball_x, ball_y, ball_vx, ball_vy, ball_rot, cam_x, cam_y;   // bola do modo Fute
+static int fute_bullet_ball(float bx, float by, float dx, float dy);    // (modo Fute) tiro empurra a bola (1 = tiro consumido)
+static void fute_blast_ball(float x, float y);                          // (modo Fute) explosao empurra a bola
 
 static char padBuf[256] __attribute__((aligned(64)));
 static GSGLOBAL *gs;
@@ -276,6 +280,12 @@ static void kill_actor(int who, int killer) {
     a->alive = 0;
     burst(a->x, a->y, 24, ccol(a->cls, 0), 3.6f, 4);
     burst(a->x, a->y, 8, RGBA(255, 255, 255), 2.5f, 3);
+    if (game_mode == 1) {                                      // fute: reaparece em 3 segundos
+        a->strafe_t = 180; a->vx = a->vy = 0;
+        if (killer >= 0 && killer != who) actors[killer].kills++;
+        if (who == 0 && shake < 8) shake = 8;
+        return;
+    }
     for (int k = 0; k <= a->cubes / 2; k++) drop_cube(a->x + frand(-22, 22), a->y + frand(-22, 22));
     if (killer >= 0 && killer != who) {
         actors[killer].kills++;
@@ -286,6 +296,7 @@ static void kill_actor(int who, int killer) {
 static void hurt(int who, float dmg, int src, float dirx, float diry) {
     Actor *a = &actors[who];
     if (!a->alive) return;
+    if (game_mode == 1 && src >= 0 && src != who && actors[src].team == a->team) return;   // sem fogo amigo
     a->hp -= dmg; a->flash = 6; a->since_hit = 0;
     if (src >= 0) {
         float kb = CLS[actors[src].cls].kb;
@@ -353,6 +364,7 @@ static void explode(float x, float y, int owner, float dmg) {
             }
         }
     }
+    if (game_mode == 1) fute_blast_ball(x, y);
     if (dist(x, y, actors[0].x, actors[0].y) < 300 && shake < 5) shake = 5;
 }
 static int try_shoot(int who, float ang) {
@@ -387,6 +399,7 @@ static void use_super(int who) {
     } else {
         for (int j = 0; j < N_ACTORS; j++) {
             if (j == who || !actors[j].alive) continue;
+            if (game_mode == 1 && actors[j].team == a->team) continue;
             float d = dist(a->x, a->y, actors[j].x, actors[j].y);
             if (d < 150) {
                 float nx = (actors[j].x - a->x) / (d + 0.01f), ny = (actors[j].y - a->y) / (d + 0.01f);
@@ -507,6 +520,58 @@ static void update_bots(void) {
     }
 }
 
+static void update_bullets(void) {
+    for (int i = 0; i < MAX_BULLETS; i++) {
+        Bullet *b = &bullets[i];
+        if (!b->active) continue;
+        if (b->lob == 2) {                                             // bomba no chao: pavio de 0.6 s
+            if (--b->life <= 0) { b->active = 0; explode(b->tx, b->ty, b->owner, b->dmg); }
+            continue;
+        }
+        if (b->lob) {                                                  // em arco: sem colisao ate chegar ao alvo
+            b->x += b->dx; b->y += b->dy;
+            if (--b->life <= 0) {
+                b->x = b->tx; b->y = b->ty; b->dx = b->dy = 0;
+                b->lob = 2; b->life = LOB_FUSE;                        // pousou: acende o pavio
+                burst(b->x, b->y, 5, RGBA(150, 118, 70), 1.5f, 3);
+            }
+            continue;
+        }
+        for (int s = 0; s < 2 && b->active; s++) {                // 2 sub-passos evitam atravessar alvos
+            b->x += b->dx * 0.5f; b->y += b->dy * 0.5f;
+            for (int k = 0; k < n_blocks; k++) {
+                Block *bl = &blocks[k];
+                if (bl->kind == BUSH || bl->kind == WATER || (bl->kind == CRATE && bl->hp <= 0)) continue;
+                if (circle_hits_block(b->x, b->y, 3, bl)) {
+                    b->active = 0;
+                    burst(b->x, b->y, 3, RGBA(240, 220, 170), 1.6f, 2);
+                    if (bl->kind == CRATE) {
+                        bl->hp -= b->dmg;
+                        if (bl->hp <= 0) {
+                            burst(bl->x + 17, bl->y + 17, 10, RGBA(230, 150, 40), 2.6f, 3);
+                            drop_cube(bl->x + bl->w / 2, bl->y + bl->h / 2);
+                        }
+                    }
+                    break;
+                }
+            }
+            if (!b->active) break;
+            if (game_mode == 1 && fute_bullet_ball(b->x, b->y, b->dx, b->dy)) { b->active = 0; break; }
+            for (int j = 0; j < N_ACTORS; j++) {
+                if (j == b->owner || !actors[j].alive) continue;
+                if (game_mode == 1 && actors[j].team == actors[b->owner].team) continue;      // sem fogo amigo
+                if (dist(actors[j].x, actors[j].y, b->x, b->y) < R + 3) {
+                    float sp = sqrtf(b->dx * b->dx + b->dy * b->dy) + 0.001f;
+                    b->active = 0;
+                    hurt(j, b->dmg, b->owner, b->dx / sp, b->dy / sp);
+                    break;
+                }
+            }
+        }
+        if (b->active && --b->life <= 0) b->active = 0;
+    }
+}
+
 static void update(struct padButtonStatus *pad, u32 btns, u32 prev) {
     frame_count++;
 
@@ -570,53 +635,7 @@ static void update(struct padButtonStatus *pad, u32 btns, u32 prev) {
                 burst(cubes[k].x, cubes[k].y, 6, RGBA(200, 120, 255), 2.0f, 3);
             }
     }
-    for (int i = 0; i < MAX_BULLETS; i++) {
-        Bullet *b = &bullets[i];
-        if (!b->active) continue;
-        if (b->lob == 2) {                                             // bomba no chao: pavio de 0.6 s
-            if (--b->life <= 0) { b->active = 0; explode(b->tx, b->ty, b->owner, b->dmg); }
-            continue;
-        }
-        if (b->lob) {                                                  // em arco: sem colisao ate chegar ao alvo
-            b->x += b->dx; b->y += b->dy;
-            if (--b->life <= 0) {
-                b->x = b->tx; b->y = b->ty; b->dx = b->dy = 0;
-                b->lob = 2; b->life = LOB_FUSE;                        // pousou: acende o pavio
-                burst(b->x, b->y, 5, RGBA(150, 118, 70), 1.5f, 3);
-            }
-            continue;
-        }
-        for (int s = 0; s < 2 && b->active; s++) {                // 2 sub-passos evitam atravessar alvos
-            b->x += b->dx * 0.5f; b->y += b->dy * 0.5f;
-            for (int k = 0; k < n_blocks; k++) {
-                Block *bl = &blocks[k];
-                if (bl->kind == BUSH || bl->kind == WATER || (bl->kind == CRATE && bl->hp <= 0)) continue;
-                if (circle_hits_block(b->x, b->y, 3, bl)) {
-                    b->active = 0;
-                    burst(b->x, b->y, 3, RGBA(240, 220, 170), 1.6f, 2);
-                    if (bl->kind == CRATE) {
-                        bl->hp -= b->dmg;
-                        if (bl->hp <= 0) {
-                            burst(bl->x + 17, bl->y + 17, 10, RGBA(230, 150, 40), 2.6f, 3);
-                            drop_cube(bl->x + bl->w / 2, bl->y + bl->h / 2);
-                        }
-                    }
-                    break;
-                }
-            }
-            if (!b->active) break;
-            for (int j = 0; j < N_ACTORS; j++) {
-                if (j == b->owner || !actors[j].alive) continue;
-                if (dist(actors[j].x, actors[j].y, b->x, b->y) < R + 3) {
-                    float sp = sqrtf(b->dx * b->dx + b->dy * b->dy) + 0.001f;
-                    b->active = 0;
-                    hurt(j, b->dmg, b->owner, b->dx / sp, b->dy / sp);
-                    break;
-                }
-            }
-        }
-        if (b->active && --b->life <= 0) b->active = 0;
-    }
+    update_bullets();
     for (int i = 0; i < MAX_PART; i++) if (parts[i].active) {
         Particle *q = &parts[i];
         q->x += q->vx; q->y += q->vy; q->vx *= 0.93f; q->vy *= 0.93f;
@@ -749,6 +768,7 @@ static const int SKIN_C[NCLS][3] = { { 255, 206, 160 }, { 242, 192, 152 }, { 196
 static const int HAIR_C[NCLS][3] = { { 214, 74, 30 }, { 76, 44, 130 }, { 44, 32, 26 }, { 34, 38, 74 }, { 40, 46, 78 } };
 
 static int visible_to(const Actor *a, int i, const Actor *p) {
+    if (game_mode == 1 && a->team == p->team) return 1;                            // aliados sempre visiveis
     if (i != 0 && a->invis > 0 && dist(a->x, a->y, p->x, p->y) > 70) return 0;      // ninja invisivel
     return !(i != 0 && in_bush(a->x, a->y) && dist(a->x, a->y, p->x, p->y) > 90);
 }
@@ -845,8 +865,9 @@ static void draw_overhead(const Actor *a, int idx, float sx, float sy) {
     const int w = 46;
     float top = sy - 34, x0 = sx - w / 2;
     float f = clampf(a->hp / maxhp(a), 0, 1);
-    u64 fill = idx == 0 ? RGBA(70, 226, 100) : RGBA(255, 74, 90);
-    u64 hi = idx == 0 ? RGBA(160, 255, 170) : RGBA(255, 150, 150);
+    int ally = (game_mode == 1) ? (a->team == 0) : (idx == 0);
+    u64 fill = ally ? RGBA(70, 226, 100) : RGBA(255, 74, 90);
+    u64 hi = ally ? RGBA(160, 255, 170) : RGBA(255, 150, 150);
     bar((int)x0, (int)top - 18, w, 9, f, fill, hi, 31);
     snprintf(buf, sizeof(buf), "%d", (int)(a->hp > 0 ? a->hp + 0.5f : 0));
     text_sh((int)(sx - text_w(buf, 1) / 2.0f), (int)top - 17, 1, RGBA(255, 255, 255), buf);
@@ -857,13 +878,115 @@ static void draw_overhead(const Actor *a, int idx, float sx, float sy) {
         rect(x, top - 6, x + 14, top - 2, RGBA(52, 48, 110), 32);
         if (fa > 0) rect(x, top - 6, x + 14 * fa, top - 2, RGBA(255, 170, 40), 33);
     }
-    text_sh((int)(sx - text_w(names[idx], 1) / 2.0f), (int)top - 29, 1, idx == 0 ? RGBA(130, 255, 160) : RGBA(255, 130, 140), names[idx]);
+    text_sh((int)(sx - text_w(names[idx], 1) / 2.0f), (int)top - 29, 1, ally ? RGBA(130, 255, 160) : RGBA(255, 130, 140), names[idx]);
+    if (game_mode == 1) { tz = old; return; }
     snprintf(buf, sizeof(buf), "%d", a->cubes);
     float xs = sx - (9 + text_w(buf, 1)) / 2.0f;
     rect(xs, top - 39, xs + 8, top - 31, RGBA(60, 16, 104), 31);
     rect(xs + 1, top - 38, xs + 7, top - 32, RGBA(178, 78, 255), 32);
     text_sh((int)xs + 11, (int)top - 39, 1, RGBA(255, 255, 255), buf);
     tz = old;
+}
+
+static void draw_blocks(float ox, float oy) {
+    for (int i = 0; i < n_blocks; i++) {
+        const Block *b = &blocks[i];
+        float x = b->x + ox, y = b->y + oy;
+        if (x > SCR_W + 8 || y > SCR_H + 8 || x + b->w < -8 || y + b->h < -8) continue;
+        if (b->kind == WATER) {
+            rect(x - 4, y - 4, x + b->w + 4, y + b->h + 4, RGBA(150, 214, 255), 2);
+            rect(x, y, x + b->w, y + b->h, RGBA(44, 138, 224), 3);
+            for (int k = 0; k < 3; k++) {
+                float rx = x + 10 + fmodf(anim * 0.4f + k * 37, b->w - 40);
+                rect(rx, y + 14 + k * (b->h - 28) / 3, rx + 22, y + 17 + k * (b->h - 28) / 3, RGBA(170, 226, 255), 4);
+            }
+        } else if (b->kind == WALL) {
+            rect(x + 4, y + 6, x + b->w + 4, y + b->h + 6, RGBA(168, 134, 80), 4);
+            rect(x - 2, y - 2, x + b->w + 2, y + b->h + 2, RGBA(58, 36, 22), 5);
+            rect(x, y, x + b->w, y + b->h, RGBA(158, 104, 70), 6);
+            rect(x, y, x + b->w, y + (b->h < 8 ? b->h : 8), RGBA(198, 140, 98), 7);
+            if (b->w >= b->h) { for (float sx = x + 28; sx < x + b->w - 4; sx += 28) rect(sx, y + 2, sx + 2, y + b->h - 2, RGBA(120, 76, 50), 7); }
+            else { for (float sy = y + 28; sy < y + b->h - 4; sy += 28) rect(x + 2, sy, x + b->w - 2, sy + 2, RGBA(120, 76, 50), 7); }
+        } else if (b->kind == ROCK) {
+            rect(x + 4, y + 6, x + b->w + 4, y + b->h + 6, RGBA(168, 134, 80), 4);
+            rect(x - 2, y - 2, x + b->w + 2, y + b->h + 2, RGBA(48, 48, 60), 5);
+            rect(x, y, x + b->w, y + b->h, RGBA(128, 130, 142), 6);
+            rect(x + 4, y + 4, x + b->w * 0.6f, y + b->h * 0.4f, RGBA(176, 178, 192), 7);
+            rect(x, y + b->h - 6, x + b->w, y + b->h, RGBA(98, 100, 112), 7);
+        } else if (b->kind == FENCE) {                                       // cerca de madeira
+            rect(x + 3, y + 4, x + b->w + 3, y + b->h + 4, RGBA(30, 100, 52), 4);
+            rect(x - 1, y - 1, x + b->w + 1, y + b->h + 1, RGBA(70, 40, 14), 5);
+            rect(x, y, x + b->w, y + b->h, RGBA(206, 140, 70), 6);
+            rect(x, y, x + b->w, y + 3, RGBA(240, 180, 104), 7);
+            if (b->w >= b->h) { for (float px = x + 6; px < x + b->w; px += 18) rect(px, y - 4, px + 7, y + b->h + 2, RGBA(150, 96, 44), 8); }
+            else { for (float py = y + 6; py < y + b->h; py += 18) rect(x - 4, py, x + b->w + 4, py + 7, RGBA(150, 96, 44), 8); }
+        } else if (b->kind == BARREL) {                                      // barril
+            float cx = x + b->w / 2, cy = y + b->h / 2, rr = b->w / 2;
+            fellipse(cx + 2, cy + rr * 0.8f, rr, rr * 0.45f, RGBA(30, 100, 52), 4);
+            fcircle(cx, cy, rr + 1.5f, RGBA(60, 34, 12), 5);
+            fcircle(cx, cy, rr, RGBA(176, 112, 52), 6);
+            rect(cx - rr, cy - 4, cx + rr, cy - 2, RGBA(90, 56, 24), 7);
+            rect(cx - rr, cy + 3, cx + rr, cy + 5, RGBA(90, 56, 24), 7);
+            fcircle(cx - rr * 0.3f, cy - rr * 0.35f, rr * 0.35f, RGBA(214, 150, 84), 7);
+        } else if (b->kind == CRATE && b->hp > 0) {
+            rect(x + 3, y + 4, x + b->w + 3, y + b->h + 4, RGBA(168, 134, 80), 4);
+            rect(x - 2, y - 2, x + b->w + 2, y + b->h + 2, RGBA(70, 40, 10), 5);
+            rect(x, y, x + b->w, y + b->h, b->hp < 30 ? RGBA(210, 132, 40) : RGBA(240, 163, 58), 6);
+            rect(x + 3, y + 3, x + b->w - 3, y + 7, RGBA(255, 198, 110), 7);
+            rect(x + 4, y + b->h / 2 - 1, x + b->w - 4, y + b->h / 2 + 2, RGBA(150, 90, 24), 7);
+            rect(x + b->w / 2 - 1, y + 4, x + b->w / 2 + 2, y + b->h - 4, RGBA(150, 90, 24), 7);
+            if (b->hp < 30) rect(x + 5, y + 10, x + b->w - 9, y + 12, RGBA(70, 40, 10), 7);
+        }
+    }
+}
+
+static void draw_bullets(float ox, float oy) {
+    for (int i = 0; i < MAX_BULLETS; i++) if (bullets[i].active) {
+        const Bullet *b = &bullets[i];
+        int cl = actors[b->owner].cls;
+        if (b->lob) {
+            int ground = (b->lob == 2);
+            float pr = ground ? 1.0f : 1.0f - b->life / (b->t0 > 0 ? b->t0 : 1.0f);
+            float arc = ground ? 0.0f : sinf(pr * PI) * 46.0f;
+            float fz = ground ? b->life / (float)LOB_FUSE : 1.0f;              // 1 -> 0 durante o pavio
+            float gx = b->x + ox, gy = b->y + oy;
+            for (int k = 0; k < 14; k++) {                              // circulo de perigo no alvo
+                float a1 = 2 * PI * k / 14, a2 = 2 * PI * (k + 1) / 14;
+                gsKit_prim_line(gs, b->tx + ox + cosf(a1) * 55, b->ty + oy + sinf(a1) * 55,
+                                    b->tx + ox + cosf(a2) * 55, b->ty + oy + sinf(a2) * 55, 10,
+                                    ground && (anim / 3) % 2 ? RGBA(255, 230, 120) : RGBA(255, 90, 100));
+                if (ground)                                                    // anel interno fecha ate explodir
+                    gsKit_prim_line(gs, b->tx + ox + cosf(a1) * 55 * (1 - fz), b->ty + oy + sinf(a1) * 55 * (1 - fz),
+                                        b->tx + ox + cosf(a2) * 55 * (1 - fz), b->ty + oy + sinf(a2) * 55 * (1 - fz), 10, RGBA(255, 255, 255));
+            }
+            fellipse(gx, gy + 4, 7, 3, RGBA(150, 118, 70), 10);
+            fcircle(gx, gy - arc, 7, RGBA(24, 22, 44), 12);
+            fcircle(gx, gy - arc, 5.5f, RGBA(70, 72, 96), 13);
+            fcircle(gx - 2, gy - arc - 2, 2, RGBA(170, 175, 200), 14);
+            fcircle(gx + 3, gy - arc - 8, ground ? 2.0f + (1 - fz) * 2.5f : 2.0f, (anim / (ground && fz < 0.4f ? 2 : 3)) % 2 ? RGBA(255, 220, 80) : RGBA(255, 120, 40), 14);
+            continue;
+        }
+        fcircle(b->x - b->dx * 0.7f + ox, b->y - b->dy * 0.7f + oy, 3, ccol(cl, -40), 11);
+        fcircle(b->x + ox, b->y + oy, 5, ccol(cl, 0), 12);
+        fcircle(b->x + ox, b->y + oy, 2.5f, RGBA(255, 255, 255), 13);
+    }
+}
+
+static void draw_bushes(float ox, float oy) {
+    for (int i = 0; i < n_blocks; i++) {
+        const Block *b = &blocks[i];
+        if (b->kind != BUSH) continue;
+        float x = b->x + ox, y = b->y + oy;
+        if (x > SCR_W + 8 || y > SCR_H + 8 || x + b->w < -8 || y + b->h < -8) continue;
+        rect(x, y, x + b->w, y + b->h, RGBA(44, 152, 78), 23);
+        rect(x + 5, y + 5, x + b->w - 5, y + b->h - 5, RGBA(70, 194, 102), 24);
+        for (int k = 0; k < 6; k++) {
+            float bx = x + 12 + (float)((i * 37 + k * 53) % (int)(b->w - 24));
+            float by = y + 12 + (float)((i * 29 + k * 31) % (int)(b->h - 24));
+            fcircle(bx, by, 7, RGBA(44, 152, 78), 25);
+            fcircle(bx - 2, by - 2, 3.5f, RGBA(108, 218, 130), 26);
+        }
+    }
 }
 
 static void render_world(float ox, float oy, const Actor *p) {
@@ -903,41 +1026,7 @@ static void render_world(float ox, float oy, const Actor *p) {
                                 cx + cosf(a1) * 3000, cy + sinf(a1) * 3000, 1, RGBA(90, 200, 100));
         gsKit_prim_line(gs, cx + cosf(a1) * zone_r, cy + sinf(a1) * zone_r, cx + cosf(a2) * zone_r, cy + sinf(a2) * zone_r, 2, RGBA(200, 255, 170));
     }
-    // blocos (sem arbustos)
-    for (int i = 0; i < n_blocks; i++) {
-        const Block *b = &blocks[i];
-        float x = b->x + ox, y = b->y + oy;
-        if (x > SCR_W + 8 || y > SCR_H + 8 || x + b->w < -8 || y + b->h < -8) continue;
-        if (b->kind == WATER) {
-            rect(x - 4, y - 4, x + b->w + 4, y + b->h + 4, RGBA(150, 214, 255), 2);
-            rect(x, y, x + b->w, y + b->h, RGBA(44, 138, 224), 3);
-            for (int k = 0; k < 3; k++) {
-                float rx = x + 10 + fmodf(anim * 0.4f + k * 37, b->w - 40);
-                rect(rx, y + 14 + k * (b->h - 28) / 3, rx + 22, y + 17 + k * (b->h - 28) / 3, RGBA(170, 226, 255), 4);
-            }
-        } else if (b->kind == WALL) {
-            rect(x + 4, y + 6, x + b->w + 4, y + b->h + 6, RGBA(168, 134, 80), 4);
-            rect(x - 2, y - 2, x + b->w + 2, y + b->h + 2, RGBA(58, 36, 22), 5);
-            rect(x, y, x + b->w, y + b->h, RGBA(158, 104, 70), 6);
-            rect(x, y, x + b->w, y + (b->h < 8 ? b->h : 8), RGBA(198, 140, 98), 7);
-            if (b->w >= b->h) { for (float sx = x + 28; sx < x + b->w - 4; sx += 28) rect(sx, y + 2, sx + 2, y + b->h - 2, RGBA(120, 76, 50), 7); }
-            else { for (float sy = y + 28; sy < y + b->h - 4; sy += 28) rect(x + 2, sy, x + b->w - 2, sy + 2, RGBA(120, 76, 50), 7); }
-        } else if (b->kind == ROCK) {
-            rect(x + 4, y + 6, x + b->w + 4, y + b->h + 6, RGBA(168, 134, 80), 4);
-            rect(x - 2, y - 2, x + b->w + 2, y + b->h + 2, RGBA(48, 48, 60), 5);
-            rect(x, y, x + b->w, y + b->h, RGBA(128, 130, 142), 6);
-            rect(x + 4, y + 4, x + b->w * 0.6f, y + b->h * 0.4f, RGBA(176, 178, 192), 7);
-            rect(x, y + b->h - 6, x + b->w, y + b->h, RGBA(98, 100, 112), 7);
-        } else if (b->kind == CRATE && b->hp > 0) {
-            rect(x + 3, y + 4, x + b->w + 3, y + b->h + 4, RGBA(168, 134, 80), 4);
-            rect(x - 2, y - 2, x + b->w + 2, y + b->h + 2, RGBA(70, 40, 10), 5);
-            rect(x, y, x + b->w, y + b->h, b->hp < 30 ? RGBA(210, 132, 40) : RGBA(240, 163, 58), 6);
-            rect(x + 3, y + 3, x + b->w - 3, y + 7, RGBA(255, 198, 110), 7);
-            rect(x + 4, y + b->h / 2 - 1, x + b->w - 4, y + b->h / 2 + 2, RGBA(150, 90, 24), 7);
-            rect(x + b->w / 2 - 1, y + 4, x + b->w / 2 + 2, y + b->h - 4, RGBA(150, 90, 24), 7);
-            if (b->hp < 30) rect(x + 5, y + 10, x + b->w - 9, y + 12, RGBA(70, 40, 10), 7);
-        }
-    }
+    draw_blocks(ox, oy);
     // cubos de poder
     for (int k = 0; k < MAX_CUBES; k++) if (cubes[k].active) {
         float bob = sinf(frame_count * 0.2f + cubes[k].x) * 2.5f, x = cubes[k].x + ox, y = cubes[k].y + oy + bob;
@@ -947,36 +1036,7 @@ static void render_world(float ox, float oy, const Actor *p) {
         rect(x - 6, y - 6, x + 6, y + 6, RGBA(178, 78, 255), 10);
         rect(x - 4, y - 4, x, y, RGBA(228, 180, 255), 11);
     }
-    // projeteis
-    for (int i = 0; i < MAX_BULLETS; i++) if (bullets[i].active) {
-        const Bullet *b = &bullets[i];
-        int cl = actors[b->owner].cls;
-        if (b->lob) {
-            int ground = (b->lob == 2);
-            float pr = ground ? 1.0f : 1.0f - b->life / (b->t0 > 0 ? b->t0 : 1.0f);
-            float arc = ground ? 0.0f : sinf(pr * PI) * 46.0f;
-            float fz = ground ? b->life / (float)LOB_FUSE : 1.0f;              // 1 -> 0 durante o pavio
-            float gx = b->x + ox, gy = b->y + oy;
-            for (int k = 0; k < 14; k++) {                              // circulo de perigo no alvo
-                float a1 = 2 * PI * k / 14, a2 = 2 * PI * (k + 1) / 14;
-                gsKit_prim_line(gs, b->tx + ox + cosf(a1) * 55, b->ty + oy + sinf(a1) * 55,
-                                    b->tx + ox + cosf(a2) * 55, b->ty + oy + sinf(a2) * 55, 10,
-                                    ground && (anim / 3) % 2 ? RGBA(255, 230, 120) : RGBA(255, 90, 100));
-                if (ground)                                                    // anel interno fecha ate explodir
-                    gsKit_prim_line(gs, b->tx + ox + cosf(a1) * 55 * (1 - fz), b->ty + oy + sinf(a1) * 55 * (1 - fz),
-                                        b->tx + ox + cosf(a2) * 55 * (1 - fz), b->ty + oy + sinf(a2) * 55 * (1 - fz), 10, RGBA(255, 255, 255));
-            }
-            fellipse(gx, gy + 4, 7, 3, RGBA(150, 118, 70), 10);
-            fcircle(gx, gy - arc, 7, RGBA(24, 22, 44), 12);
-            fcircle(gx, gy - arc, 5.5f, RGBA(70, 72, 96), 13);
-            fcircle(gx - 2, gy - arc - 2, 2, RGBA(170, 175, 200), 14);
-            fcircle(gx + 3, gy - arc - 8, ground ? 2.0f + (1 - fz) * 2.5f : 2.0f, (anim / (ground && fz < 0.4f ? 2 : 3)) % 2 ? RGBA(255, 220, 80) : RGBA(255, 120, 40), 14);
-            continue;
-        }
-        fcircle(b->x - b->dx * 0.7f + ox, b->y - b->dy * 0.7f + oy, 3, ccol(cl, -40), 11);
-        fcircle(b->x + ox, b->y + oy, 5, ccol(cl, 0), 12);
-        fcircle(b->x + ox, b->y + oy, 2.5f, RGBA(255, 255, 255), 13);
-    }
+    draw_bullets(ox, oy);
     // personagens
     for (int i = 0; i < N_ACTORS; i++) {
         const Actor *a = &actors[i];
@@ -987,21 +1047,7 @@ static void render_world(float ox, float oy, const Actor *p) {
         draw_human(a->x + ox, a->y + oy, a->cls, a->face, a->aim, frame_count * 0.45f + i * 1.7f,
                    spd > 0.6f, look, a->recoil, i == 0);
     }
-    // arbustos por cima
-    for (int i = 0; i < n_blocks; i++) {
-        const Block *b = &blocks[i];
-        if (b->kind != BUSH) continue;
-        float x = b->x + ox, y = b->y + oy;
-        if (x > SCR_W + 8 || y > SCR_H + 8 || x + b->w < -8 || y + b->h < -8) continue;
-        rect(x, y, x + b->w, y + b->h, RGBA(44, 152, 78), 23);
-        rect(x + 5, y + 5, x + b->w - 5, y + b->h - 5, RGBA(70, 194, 102), 24);
-        for (int k = 0; k < 6; k++) {
-            float bx = x + 12 + (float)((i * 37 + k * 53) % (int)(b->w - 24));
-            float by = y + 12 + (float)((i * 29 + k * 31) % (int)(b->h - 24));
-            fcircle(bx, by, 7, RGBA(44, 152, 78), 25);
-            fcircle(bx - 2, by - 2, 3.5f, RGBA(108, 218, 130), 26);
-        }
-    }
+    draw_bushes(ox, oy);
     if (p->alive && in_bush(p->x, p->y)) fcircle(p->x + ox, p->y + oy, 6, RGBA(53, 201, 245), 27);
     for (int i = 0; i < N_ACTORS; i++) {
         const Actor *a = &actors[i];
@@ -1155,58 +1201,91 @@ static void render(void) {
     render_hud(p);
 }
 
-// ---------- modo FUTE REIS 3x3 ----------
-// 3 contra 3 (voce + 2 bots azuis x 3 bots vermelhos). Quem fizer 2 gols ganha; partida de 2 minutos.
-// Acabou o tempo: quem tem mais gols ganha; empate vai para o gol de ouro.
-// Controles: analogico esq = mover | analogico dir = mirar o chute | R1 = chutar | L1 = disparada
-#define FW 1100.0f                     // comprimento do campo
-#define FH 600.0f                      // largura do campo
-#define GY1 210.0f                     // boca do gol (y inicial)
-#define GY2 390.0f                     // boca do gol (y final)
-#define GOAL_D 56.0f                   // profundidade do gol
+// ---------- modo FUTE REIS 3x3 (arena vertical) ----------
+// Voce + 2 bots (azul, defende embaixo) x 3 bots (vermelho, defende em cima). Quem fizer 2 gols ganha; 2 minutos.
+// Acabou o tempo: mais gols vence; empate vai para o gol de ouro. Armas funcionam: tiro tira vida do rival,
+// quem morre reaparece em 3 s. Tiros e explosoes tambem empurram a bola.
+// Controles: analogico esq = mover | dir = mirar | R1 = atirar | R2 (ou O) = chutar a bola | L1 = super
+#define FW 720.0f                      // largura do campo
+#define FH 1240.0f                     // comprimento do campo
+#define GX1 260.0f                     // boca do gol (x inicial)
+#define GX2 460.0f                     // boca do gol (x final)
+#define GOAL_D 60.0f                   // profundidade do gol
 #define BALL_R 9.0f
 #define FUTE_N 6
 #define FUTE_TIME 7200                 // 2 minutos a 60 quadros
 #define FUTE_GOALS 2
 #define KICK_CD 22
-#define DASH_CD 150
 
 static const float KICK_POW[NCLS] = { 10.5f, 13.0f, 11.5f, 10.5f, 10.0f };   // forca do chute por classe
-static const float DASH_POW[NCLS] = {  9.0f,  9.0f,  8.0f,  9.0f, 12.0f };   // disparada por classe
-static const float FORM[FUTE_N][2] = { { 0.36f, 0.50f }, { 0.26f, 0.22f }, { 0.12f, 0.50f },
-                                       { 0.64f, 0.50f }, { 0.74f, 0.78f }, { 0.88f, 0.50f } };
+static const float FORM[FUTE_N][2] = { { 0.50f, 0.80f }, { 0.26f, 0.70f }, { 0.74f, 0.70f },
+                                       { 0.50f, 0.20f }, { 0.74f, 0.30f }, { 0.26f, 0.30f } };
 
-static float ball_x, ball_y, ball_vx, ball_vy, ball_rot, cam_x, cam_y;
-static int score[2], fute_phase, fute_t, fute_time, fute_golden, fute_done, fute_result, goal_team, fute_finish, golden_msg;
+static int ball_idle, score[2], fute_phase, fute_t, fute_time, fute_golden, fute_done, fute_result, goal_team, fute_finish, golden_msg;
 // fute_phase: 0 = contagem, 1 = jogo, 2 = pausa (gol ou fim)
 
+static void flow_init(void);
+static void flow_build(void);
+
+// ---- mapa: obstaculos com simetria de 180 graus (justo para os dois times) ----
+static void fb_add(int kind, float x, float y, float w, float h) {
+    if (n_blocks >= MAX_BLOCKS - 1) return;
+    blocks[n_blocks++] = (Block){ x, y, w, h, kind == CRATE ? 1e9f : 1.0f, kind };
+}
+static void fb_sym(int kind, float x, float y, float w, float h) {
+    fb_add(kind, x, y, w, h);
+    float x2 = FW - x - w, y2 = FH - y - h;
+    if (fabsf(x2 - x) > 1 || fabsf(y2 - y) > 1) fb_add(kind, x2, y2, w, h);
+}
+static void fute_build_map(void) {
+    n_blocks = 0;
+    fb_sym(BUSH,  36, 250, 150, 120);
+    fb_sym(BUSH, 540, 420, 150, 100);
+    fb_sym(BUSH, 270, 480, 130,  80);
+    fb_sym(CRATE, 300, 300, 34, 34); fb_sym(CRATE, 334, 300, 34, 34); fb_sym(CRATE, 368, 300, 34, 34);
+    fb_sym(CRATE,  60, 500, 34, 34); fb_sym(CRATE,  94, 500, 34, 34); fb_sym(CRATE, 60, 534, 34, 34);
+    fb_sym(CRATE, 600, 200, 34, 34); fb_sym(CRATE, 600, 234, 34, 34);
+    fb_sym(CRATE, 170, 603, 34, 34); fb_sym(CRATE, 204, 603, 34, 34);
+    fb_sym(BARREL, 120, 170, 30, 30); fb_sym(BARREL, 590, 520, 30, 30);
+    fb_sym(BARREL, 200, 440, 30, 30); fb_sym(BARREL, 480, 260, 30, 30);
+    fb_sym(FENCE, 120, 580, 110, 16); fb_sym(FENCE, 440, 560, 130, 16);
+    fb_sym(FENCE,  40, 100,  16, 90); fb_sym(FENCE, 664, 330,  16, 90);
+}
+
+static void fute_spawn(int i) {                                       // posiciona no ponto inicial
+    Actor *a = &actors[i];
+    a->x = FW * FORM[i][0]; a->y = FH * FORM[i][1];
+    a->vx = a->vy = 0; a->alive = 1; a->hp = maxhp(a); a->ammo = 3; a->cd = 0;
+    a->since_hit = 999; a->flash = 0; a->invis = 0; a->strafe_t = 0; a->stuck = 0;
+    a->aim = a->face = (i < 3) ? -PI / 2 : PI / 2;
+}
 static void fute_kickoff(int frames) {
     ball_x = FW / 2; ball_y = FH / 2; ball_vx = ball_vy = 0;
-    for (int i = 0; i < FUTE_N; i++) {
-        Actor *a = &actors[i];
-        a->x = FW * FORM[i][0]; a->y = FH * FORM[i][1];
-        a->vx = a->vy = 0; a->cd = 0; a->super = 0;
-        a->aim = a->face = (i < 3) ? 0.0f : PI;
-    }
-    fute_phase = 0; fute_t = frames;
+    memset(bullets, 0, sizeof(bullets));
+    for (int i = 0; i < FUTE_N; i++) fute_spawn(i);
+    fute_phase = 0; fute_t = frames; ball_idle = 0;
+    flow_build();
 }
 static void fute_reset(void) {
     srand(frame_count * 7 + anim + 777);
     memset(actors, 0, sizeof(actors));
     memset(parts, 0, sizeof(parts));
+    memset(dmgs, 0, sizeof(dmgs));
     for (int i = 0; i < FUTE_N; i++) {
         Actor *a = &actors[i];
-        a->alive = 1; a->team = i / 3;
+        a->team = i / 3;
         a->cls = (i == 0) ? player_cls : rand() % NCLS;
         if (i == 0) snprintf(names[i], sizeof(names[i]), "VOCE");
         else if (i < 3) snprintf(names[i], sizeof(names[i]), "AMIGO %d", i);
         else snprintf(names[i], sizeof(names[i]), "INIM %d", i - 2);
     }
+    fute_build_map();
+    flow_init();
     score[0] = score[1] = 0;
     fute_time = FUTE_TIME; fute_golden = 0; fute_done = 0; fute_result = 0; fute_finish = 0; goal_team = -1; golden_msg = 0;
     shake = 0; frame_count = 0;
     fute_kickoff(180);
-    cam_x = FW / 2; cam_y = FH / 2;
+    cam_x = ball_x; cam_y = actors[0].y;
 }
 
 static void fmove(Actor *a, float ix, float iy, float maxspeed) {
@@ -1215,7 +1294,8 @@ static void fmove(Actor *a, float ix, float iy, float maxspeed) {
     float k = (m > 0.05f) ? 0.16f : 0.22f;
     a->vx += (ix * maxspeed - a->vx) * k;
     a->vy += (iy * maxspeed - a->vy) * k;
-    a->x += a->vx; a->y += a->vy;
+    if (!solid_at(a->x + a->vx, a->y, R)) a->x += a->vx; else a->vx = 0;
+    if (!solid_at(a->x, a->y + a->vy, R)) a->y += a->vy; else a->vy = 0;
     if (a->x < R) { a->x = R; a->vx = 0; }
     if (a->x > FW - R) { a->x = FW - R; a->vx = 0; }
     if (a->y < R) { a->y = R; a->vy = 0; }
@@ -1233,98 +1313,227 @@ static int fute_kick(Actor *a, float ang) {
     burst(ball_x, ball_y, 6, RGBA(255, 255, 255), 2.5f, 3);
     return 1;
 }
-static void fute_dash(Actor *a, float ang) {
-    a->vx += cosf(ang) * DASH_POW[a->cls];
-    a->vy += sinf(ang) * DASH_POW[a->cls];
-    a->super = DASH_CD;
-    burst(a->x, a->y + 8, 8, RGBA(230, 230, 200), 2.0f, 3);
+static int fute_bullet_ball(float bx, float by, float dx, float dy) {   // tiro acerta a bola: empurra
+    if (dist(bx, by, ball_x, ball_y) > BALL_R + 4) return 0;
+    ball_vx += dx * 0.5f; ball_vy += dy * 0.5f;
+    burst(ball_x, ball_y, 3, RGBA(255, 255, 255), 2.0f, 2);
+    return 1;
+}
+static void fute_blast_ball(float x, float y) {                       // explosao joga a bola longe
+    float d = dist(x, y, ball_x, ball_y);
+    if (d > 58 + BALL_R + 8) return;
+    ball_vx += (ball_x - x) / (d + 0.01f) * 10.0f;
+    ball_vy += (ball_y - y) / (d + 0.01f) * 10.0f;
+}
+
+// ---- caminhos dos bots: mapa de distancias (BFS) ate a bola numa grade de 24 px ----
+#define GC 24.0f
+#define GW 30
+#define GH 52
+static unsigned char walk[GW * GH];
+static short flow[GW * GH];
+static void flow_init(void) {
+    for (int gy = 0; gy < GH; gy++)
+        for (int gx = 0; gx < GW; gx++)
+            walk[gy * GW + gx] = !solid_at((gx + 0.5f) * GC, (gy + 0.5f) * GC, R + 1.0f);
+}
+static int cell_of(float x, float y) {
+    int gx = (int)(x / GC), gy = (int)(y / GC);
+    gx = gx < 0 ? 0 : (gx >= GW ? GW - 1 : gx); gy = gy < 0 ? 0 : (gy >= GH ? GH - 1 : gy);
+    return gy * GW + gx;
+}
+static void flow_build(void) {
+    static short q[GW * GH];
+    for (int i = 0; i < GW * GH; i++) flow[i] = -1;
+    int h = 0, t = 0, c0 = cell_of(ball_x, ball_y);
+    flow[c0] = 0; q[t++] = c0;
+    while (h < t) {
+        int c = q[h++], cx = c % GW, cy = c / GW;
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+                if (!dx && !dy) continue;
+                int nx = cx + dx, ny = cy + dy;
+                if (nx < 0 || ny < 0 || nx >= GW || ny >= GH) continue;
+                int n = ny * GW + nx;
+                if (flow[n] >= 0 || !walk[n]) continue;
+                if (dx && dy && (!walk[cy * GW + nx] || !walk[ny * GW + cx])) continue;   // sem cortar quina
+                flow[n] = flow[c] + 1; q[t++] = n;
+            }
+    }
+}
+static int flow_dir(float x, float y, float *ox, float *oy) {      // direcao do proximo passo rumo a bola
+    int c = cell_of(x, y), cx = c % GW, cy = c / GW, best = -1; short bv = flow[c] >= 0 ? flow[c] : 32000;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue;
+            int nx = cx + dx, ny = cy + dy;
+            if (nx < 0 || ny < 0 || nx >= GW || ny >= GH) continue;
+            int n = ny * GW + nx;
+            if (!walk[n] || flow[n] < 0 || flow[n] >= bv) continue;
+            if (dx && dy && (!walk[cy * GW + nx] || !walk[ny * GW + cx])) continue;
+            bv = flow[n]; best = n;
+        }
+    if (best < 0) return 0;
+    float tx = (best % GW + 0.5f) * GC - x, ty = (best / GW + 0.5f) * GC - y, d = sqrtf(tx * tx + ty * ty) + 0.01f;
+    *ox = tx / d; *oy = ty / d;
+    return 1;
+}
+static int clear_path(float x, float y, float tx, float ty) {      // linha reta livre de obstaculos?
+    float d = dist(x, y, tx, ty);
+    for (float k = 14; k < d; k += 14)
+        if (solid_at(x + (tx - x) * k / d, y + (ty - y) * k / d, R - 1.0f)) return 0;
+    return 1;
+}
+
+static void fute_bot_shoot(int i) {                                   // bot atira no inimigo mais perto
+    Actor *b = &actors[i];
+    const ClassDef *c = &CLS[b->cls];
+    float rng = (c->lob ? c->bspeed * c->life : c->bspeed * c->life * 0.9f);
+    int ne = -1; float bd = rng;
+    for (int j = 0; j < FUTE_N; j++) {
+        const Actor *e = &actors[j];
+        if (!e->alive || e->team == b->team) continue;
+        float d = dist(b->x, b->y, e->x, e->y);
+        if (d > 90 && in_bush(e->x, e->y)) continue;
+        if (e->invis > 0 && d > 70) continue;
+        if (d < bd) { bd = d; ne = j; }
+    }
+    if (ne < 0) return;
+    float ang = atan2f(actors[ne].y - b->y, actors[ne].x - b->x);
+    if (b->super >= 100 && bd < 220) { b->aim = ang; b->aimd = bd; use_super(i); return; }
+    if (b->ammo >= 1 && b->cd <= 0 && rand() % 8 == 0) {
+        b->aimd = bd;
+        try_shoot(i, ang + frand(-0.12f, 0.12f));
+    }
 }
 
 static void fute_bot(int i, int play) {
     Actor *b = &actors[i];
+    if (!b->alive) return;
     int team = b->team, slot = i % 3;
-    float dirx = team == 0 ? 1.0f : -1.0f;
-    float own_x = team == 0 ? 0.0f : FW, opp_x = team == 0 ? FW : 0.0f;
-    float gmid = (GY1 + GY2) * 0.5f;
-    int chaser = team * 3; float best = 1e9f;
+    float diry = team == 0 ? -1.0f : 1.0f;
+    float own_y = team == 0 ? FH : 0.0f, opp_y = team == 0 ? 0.0f : FH;
+    int chaser = -1; float best = 1e9f;
     for (int j = team * 3; j < team * 3 + 3; j++) {
+        if (!actors[j].alive) continue;
         float d = dist(actors[j].x, actors[j].y, ball_x, ball_y);
         if (j == 0) d -= 40;                                           // se o humano esta perto da bola, o bot nao disputa
         if (d < best) { best = d; chaser = j; }
     }
     float db = dist(b->x, b->y, ball_x, ball_y);
     float ix = 0, iy = 0, spd = 0.85f, want = atan2f(ball_y - b->y, ball_x - b->x);
+    int use_steer = 1;
     int chase = (chaser == i);
-    if (slot == 2 && !chase && fabsf(ball_x - own_x) < 260 && db < 260) chase = 1;    // zagueiro limpa a area
+    if (slot == 2 && !chase && fabsf(ball_y - own_y) < 300 && db < 300) chase = 1;    // zagueiro limpa a area
 
     if (chase) {
-        float tgy = gmid + sinf(i * 1.7f + frame_count * 0.01f) * 55.0f;
-        float ga = atan2f(tgy - ball_y, opp_x - ball_x);
-        float ax = ball_x - cosf(ga) * 26.0f, ay = ball_y - sinf(ga) * 26.0f;    // ponto atras da bola
-        float dap = dist(b->x, b->y, ax, ay);
-        float front = (b->x - ball_x) * cosf(ga) + (b->y - ball_y) * sinf(ga);
-        if (dap > 34.0f) {
-            ix = (ax - b->x) / (dap + 0.01f); iy = (ay - b->y) / (dap + 0.01f);
-            if (front > -6.0f && db < 70.0f) {                          // contorna a bola para nao empurrar para tras
-                ix += (b->x - ball_x) / (db + 0.01f) * 1.3f; iy += (b->y - ball_y) / (db + 0.01f) * 1.3f;
-            }
-        } else { ix = cosf(ga); iy = sinf(ga); }
+        float tgx = FW * 0.5f + sinf(i * 1.7f + frame_count * 0.01f) * 55.0f;
+        float ga = atan2f(opp_y - ball_y, tgx - ball_x);
+        float lx = ball_x + ball_vx * 6.0f - b->x, ly = ball_y + ball_vy * 6.0f - b->y, ld = sqrtf(lx * lx + ly * ly) + 0.01f;
+        ix = lx / ld; iy = ly / ld;                                    // vai direto na bola (com leve antecipacao)
+        if (!clear_path(b->x, b->y, ball_x, ball_y)) { float fx, fy; if (flow_dir(b->x, b->y, &fx, &fy)) { ix = fx; iy = fy; } }   // senao contorna pelo caminho livre
+        use_steer = 0;
         spd = 0.95f; want = ga;
-        if (play && db < R + BALL_R + 12.0f && dap < 44.0f && fabsf(angle_diff(b->aim, ga)) < 0.5f)
-            fute_kick(b, ga + frand(-0.10f, 0.10f));
-        if (play && db > 220.0f && b->super <= 0 && rand() % 120 == 0)
-            fute_dash(b, atan2f(ball_y - b->y, ball_x - b->x));
+        if (play && db < R + BALL_R + 12.0f) { b->aim = ga; fute_kick(b, ga + frand(-0.10f, 0.10f)); }   // chute sempre rumo ao gol rival
     } else {
         float px, py;
-        if (slot == 2) { px = own_x + dirx * 150.0f; py = clampf(ball_y, GY1 - 30, GY2 + 30); }
-        else if (slot == 1) { px = clampf(ball_x + dirx * 170.0f, 160, FW - 160); py = (team == 0 ? 0.25f : 0.75f) * FH + (ball_y - FH * 0.5f) * 0.2f; }
-        else { px = clampf(ball_x - dirx * 110.0f, 140, FW - 140); py = FH * 0.5f + (ball_y - FH * 0.5f) * 0.6f; }
+        if (slot == 2) { px = clampf(ball_x, GX1 - 20, GX2 + 20); py = own_y + diry * 160.0f; }
+        else if (slot == 1) { py = clampf(ball_y + diry * 170.0f, 160, FH - 160); px = (team == 0 ? 0.25f : 0.75f) * FW + (ball_x - FW * 0.5f) * 0.2f; }
+        else { py = clampf(ball_y - diry * 110.0f, 140, FH - 140); px = FW * 0.5f + (ball_x - FW * 0.5f) * 0.6f; }
         float dx = px - b->x, dy = py - b->y, dd = sqrtf(dx * dx + dy * dy);
         if (dd > 12.0f) { float m = dd / 70.0f; if (m > 1) m = 1; ix = dx / dd * m; iy = dy / dd * m; }
     }
-    if (play) fmove(b, ix, iy, CLS[b->cls].speed * spd); else fmove(b, 0, 0, 0);
+    float mm = sqrtf(ix * ix + iy * iy);
+    if (mm > 0.05f && use_steer) {                                     // desvia de obstaculos
+        float a2 = steer(b, atan2f(iy, ix));
+        ix = cosf(a2) * mm; iy = sinf(a2) * mm;
+    }
+    if (play) {                                                        // destrava: preso contra cerca/caixa, anda sem rumo por 40 quadros
+        float sp = sqrtf(b->vx * b->vx + b->vy * b->vy);
+        if (b->strafe_t <= 0 && mm > 0.3f && sp < 0.25f) b->stuck++; else if (b->strafe_t <= 0) b->stuck = 0;
+        if (b->stuck > 25 && b->strafe_t <= 0) { b->strafe_t = 40; b->ua = frand(0, 2 * PI); b->stuck = 0; }
+        if (b->strafe_t > 0) { b->strafe_t--; ix = cosf(b->ua); iy = sinf(b->ua); }
+    }
+    if (play) { fmove(b, ix, iy, CLS[b->cls].speed * spd); fute_bot_shoot(i); } else fmove(b, 0, 0, 0);
     b->aim = angle_lerp(b->aim, want, 0.16f);
 }
 
 static void fute_goal(int team) {
     score[team]++; goal_team = team; fute_phase = 2; fute_t = 150; shake = 10;
     if (score[team] >= FUTE_GOALS || fute_golden) { fute_finish = 1; fute_result = (team == 0); }
-    float gx = team == 0 ? FW : 0;
+    float gy = team == 0 ? 0 : FH;
     u64 c1 = team == 0 ? RGBA(70, 150, 255) : RGBA(255, 90, 100);
-    for (int k = 0; k < 40; k++) spawn_part(gx + frand(-30, 30), frand(GY1, GY2), frand(-3, 3), frand(-4, 1), frand(30, 50), 4, k % 2 ? c1 : RGBA(255, 220, 80));
+    for (int k = 0; k < 40; k++) spawn_part(frand(GX1, GX2), gy + frand(-30, 30), frand(-3, 3), frand(-4, 1), frand(30, 50), 4, k % 2 ? c1 : RGBA(255, 220, 80));
 }
 
+static void ball_vs_blocks(void) {
+    for (int k = 0; k < n_blocks; k++) {
+        const Block *b = &blocks[k];
+        if (b->kind == BUSH || b->kind == WATER || (b->kind == CRATE && b->hp <= 0)) continue;
+        float cx = clampf(ball_x, b->x, b->x + b->w), cy = clampf(ball_y, b->y, b->y + b->h);
+        float dx = ball_x - cx, dy = ball_y - cy, d2 = dx * dx + dy * dy;
+        if (d2 >= BALL_R * BALL_R) continue;
+        float d = sqrtf(d2), nx, ny;
+        if (d > 0.01f) { nx = dx / d; ny = dy / d; }
+        else {                                                         // centro dentro do bloco: sai pelo lado mais perto
+            float l = ball_x - b->x, r = b->x + b->w - ball_x, t = ball_y - b->y, bt = b->y + b->h - ball_y;
+            float m = fminf(fminf(l, r), fminf(t, bt));
+            if (m == l) { nx = -1; ny = 0; d = -l; } else if (m == r) { nx = 1; ny = 0; d = -r; }
+            else if (m == t) { nx = 0; ny = -1; d = -t; } else { nx = 0; ny = 1; d = -bt; }
+        }
+        ball_x += nx * (BALL_R - d); ball_y += ny * (BALL_R - d);
+        float vn = ball_vx * nx + ball_vy * ny;
+        if (vn < 0) { ball_vx -= 1.75f * vn * nx; ball_vy -= 1.75f * vn * ny; }
+    }
+}
+static void ball_walls(void) {
+    if (ball_y > 0 && ball_y < FH) {                                   // laterais do campo
+        if (ball_x < BALL_R) { ball_x = BALL_R; ball_vx = fabsf(ball_vx) * 0.8f; }
+        if (ball_x > FW - BALL_R) { ball_x = FW - BALL_R; ball_vx = -fabsf(ball_vx) * 0.8f; }
+    }
+    int mouth = (ball_x > GX1 + 8 && ball_x < GX2 - 8);
+    if (ball_y < BALL_R) {                                             // linha de fundo de cima
+        if (mouth) {
+            if (ball_y < -GOAL_D + BALL_R) { ball_y = -GOAL_D + BALL_R; ball_vy = fabsf(ball_vy) * 0.25f; }
+            if (ball_y < 0) {
+                if (ball_x < GX1 + BALL_R) { ball_x = GX1 + BALL_R; ball_vx = fabsf(ball_vx) * 0.5f; }
+                if (ball_x > GX2 - BALL_R) { ball_x = GX2 - BALL_R; ball_vx = -fabsf(ball_vx) * 0.5f; }
+            }
+        } else { ball_y = BALL_R; ball_vy = fabsf(ball_vy) * 0.8f; }
+    }
+    if (ball_y > FH - BALL_R) {                                        // linha de fundo de baixo
+        if (mouth) {
+            if (ball_y > FH + GOAL_D - BALL_R) { ball_y = FH + GOAL_D - BALL_R; ball_vy = -fabsf(ball_vy) * 0.25f; }
+            if (ball_y > FH) {
+                if (ball_x < GX1 + BALL_R) { ball_x = GX1 + BALL_R; ball_vx = fabsf(ball_vx) * 0.5f; }
+                if (ball_x > GX2 - BALL_R) { ball_x = GX2 - BALL_R; ball_vx = -fabsf(ball_vx) * 0.5f; }
+            }
+        } else { ball_y = FH - BALL_R; ball_vy = -fabsf(ball_vy) * 0.8f; }
+    }
+}
 static void ball_physics(int allow_goal) {
-    ball_x += ball_vx; ball_y += ball_vy;
     float sp = sqrtf(ball_vx * ball_vx + ball_vy * ball_vy);
     if (sp > 17.0f) { ball_vx *= 17.0f / sp; ball_vy *= 17.0f / sp; sp = 17.0f; }
+    int steps = (int)(sp / 5.0f) + 1;
+    for (int s = 0; s < steps; s++) {                                  // sub-passos: a bola nao atravessa cercas
+        ball_x += ball_vx / steps; ball_y += ball_vy / steps;
+        ball_walls(); ball_vs_blocks();
+    }
     ball_vx *= 0.985f; ball_vy *= 0.985f;
     if (sp < 0.06f) ball_vx = ball_vy = 0;
     ball_rot += sp * 0.08f;
-    if (ball_y < BALL_R) { ball_y = BALL_R; ball_vy = fabsf(ball_vy) * 0.8f; }
-    if (ball_y > FH - BALL_R) { ball_y = FH - BALL_R; ball_vy = -fabsf(ball_vy) * 0.8f; }
-    int mouth = (ball_y > GY1 + 8 && ball_y < GY2 - 8);
-    if (ball_x < BALL_R) {
-        if (mouth) {
-            if (ball_x < -GOAL_D + BALL_R) { ball_x = -GOAL_D + BALL_R; ball_vx = fabsf(ball_vx) * 0.25f; }
-            if (ball_x < 0) {
-                if (ball_y < GY1 + BALL_R) { ball_y = GY1 + BALL_R; ball_vy = fabsf(ball_vy) * 0.5f; }
-                if (ball_y > GY2 - BALL_R) { ball_y = GY2 - BALL_R; ball_vy = -fabsf(ball_vy) * 0.5f; }
-            }
-        } else { ball_x = BALL_R; ball_vx = fabsf(ball_vx) * 0.8f; }
+    if (allow_goal) {                                                  // bola parada por 8 s: volta ao centro
+        ball_idle = (sp < 0.1f) ? ball_idle + 1 : 0;
+        if (ball_idle > 480) {
+            burst(ball_x, ball_y, 12, RGBA(255, 255, 255), 2.5f, 3);
+            ball_x = FW / 2; ball_y = FH / 2; ball_vx = ball_vy = 0; ball_idle = 0;
+            burst(ball_x, ball_y, 12, RGBA(255, 255, 255), 2.5f, 3);
+        }
     }
-    if (ball_x > FW - BALL_R) {
-        if (mouth) {
-            if (ball_x > FW + GOAL_D - BALL_R) { ball_x = FW + GOAL_D - BALL_R; ball_vx = -fabsf(ball_vx) * 0.25f; }
-            if (ball_x > FW) {
-                if (ball_y < GY1 + BALL_R) { ball_y = GY1 + BALL_R; ball_vy = fabsf(ball_vy) * 0.5f; }
-                if (ball_y > GY2 - BALL_R) { ball_y = GY2 - BALL_R; ball_vy = -fabsf(ball_vy) * 0.5f; }
-            }
-        } else { ball_x = FW - BALL_R; ball_vx = -fabsf(ball_vx) * 0.8f; }
-    }
+    int mouth = (ball_x > GX1 + 8 && ball_x < GX2 - 8);
     if (allow_goal && mouth) {
-        if (ball_x < -BALL_R * 0.5f) fute_goal(1);
-        else if (ball_x > FW + BALL_R * 0.5f) fute_goal(0);
+        if (ball_y < -BALL_R * 0.5f) fute_goal(0);                     // azul ataca o gol de cima
+        else if (ball_y > FH + BALL_R * 0.5f) fute_goal(1);
     }
 }
 
@@ -1332,14 +1541,23 @@ static void fute_update(struct padButtonStatus *pad, u32 btns, u32 prev) {
     frame_count++;
     for (int i = 0; i < FUTE_N; i++) {
         Actor *a = &actors[i];
+        if (!a->alive) {                                               // reaparecer
+            if (--a->strafe_t <= 0) fute_spawn(i);
+            continue;
+        }
         if (a->cd > 0) a->cd--;
-        if (a->super > 0) a->super--;                                  // recarga da disparada
+        if (a->ammo < 3) a->ammo = clampf(a->ammo + 1.0f / CLS[a->cls].reload, 0, 3);
+        if (a->flash > 0) a->flash--;
+        if (a->invis > 0 && --a->invis == 0) burst(a->x, a->y, 14, RGBA(120, 130, 170), 2.5f, 4);
         if (a->recoil > 0) a->recoil *= 0.8f;
+        a->since_hit++;
+        if (a->since_hit > 120 && a->hp < maxhp(a)) a->hp = clampf(a->hp + 0.25f, 0, maxhp(a));
+        if (fute_phase == 1) a->super = clampf(a->super + 0.025f, 0, 100);       // super carrega com o tempo e com acertos
     }
     if (golden_msg > 0) golden_msg--;
 
     if (fute_phase == 0) {                                             // contagem: todos parados
-        for (int i = 0; i < FUTE_N; i++) fmove(&actors[i], 0, 0, 0);
+        for (int i = 0; i < FUTE_N; i++) if (actors[i].alive) fmove(&actors[i], 0, 0, 0);
         if (--fute_t <= 0) fute_phase = 1;
     } else if (fute_phase == 1) {
         if (!fute_golden && --fute_time <= 0) {                        // fim do tempo
@@ -1348,19 +1566,26 @@ static void fute_update(struct padButtonStatus *pad, u32 btns, u32 prev) {
             else { fute_golden = 1; golden_msg = 180; }
         }
         Actor *p = &actors[0];
-        float lx = ((int)pad->ljoy_h - 128) / 128.0f, ly = ((int)pad->ljoy_v - 128) / 128.0f;
-        float rx = ((int)pad->rjoy_h - 128) / 128.0f, ry = ((int)pad->rjoy_v - 128) / 128.0f;
-        float lm = sqrtf(lx * lx + ly * ly);
-        if (lm > 0.2f) { float s = (lm - 0.2f) / 0.8f; if (s > 1) s = 1; lx = lx / lm * s; ly = ly / lm * s; } else { lx = 0; ly = 0; }
-        fmove(p, lx, ly, CLS[p->cls].speed * 0.97f);
-        if (sqrtf(rx * rx + ry * ry) > 0.35f) { p->aim = atan2f(ry, rx); p->aiming = 1; }
-        else { p->aiming = 0; if (lm > 0.2f) p->aim = atan2f(ly, lx); }
-        if (btns & PAD_R1) fute_kick(p, p->aim);
-        if ((btns & PAD_L1) && !(prev & PAD_L1) && p->super <= 0) fute_dash(p, lm > 0.2f ? atan2f(ly, lx) : p->aim);
+        if (p->alive) {
+            const ClassDef *c = &CLS[p->cls];
+            float lx = ((int)pad->ljoy_h - 128) / 128.0f, ly = ((int)pad->ljoy_v - 128) / 128.0f;
+            float rx = ((int)pad->rjoy_h - 128) / 128.0f, ry = ((int)pad->rjoy_v - 128) / 128.0f;
+            float lm = sqrtf(lx * lx + ly * ly);
+            if (lm > 0.2f) { float s = (lm - 0.2f) / 0.8f; if (s > 1) s = 1; lx = lx / lm * s; ly = ly / lm * s; } else { lx = 0; ly = 0; }
+            fmove(p, lx, ly, c->speed * 0.97f * (p->aiming ? 0.85f : 1.0f) * (p->invis > 0 ? 1.2f : 1.0f));
+            float rm = sqrtf(rx * rx + ry * ry), rng = c->bspeed * c->life;
+            if (rm > 0.35f) { p->aim = atan2f(ry, rx); p->aiming = 1; p->aimd = 90 + clampf((rm - 0.35f) / 0.65f, 0, 1) * (rng - 90); }
+            else { p->aiming = 0; if (lm > 0.2f) p->aim = atan2f(ly, lx); p->aimd = rng * 0.6f; }
+            if (btns & PAD_R1) try_shoot(0, p->aim);                   // R1 atira
+            if (btns & (PAD_R2 | PAD_CIRCLE)) fute_kick(p, p->aim);    // R2 chuta a bola
+            if ((btns & PAD_L1) && !(prev & PAD_L1)) use_super(0);
+        }
+        if (frame_count % 10 == 0) flow_build();
         for (int i = 1; i < FUTE_N; i++) fute_bot(i, 1);
 
         for (int i = 0; i < FUTE_N; i++)                               // jogadores se empurram
             for (int j = i + 1; j < FUTE_N; j++) {
+                if (!actors[i].alive || !actors[j].alive) continue;
                 float d = dist(actors[i].x, actors[i].y, actors[j].x, actors[j].y);
                 if (d < 2 * R && d > 0.01f) {
                     float nx = (actors[j].x - actors[i].x) / d, ny = (actors[j].y - actors[i].y) / d, push = (2 * R - d) * 0.5f;
@@ -1369,6 +1594,7 @@ static void fute_update(struct padButtonStatus *pad, u32 btns, u32 prev) {
             }
         for (int i = 0; i < FUTE_N; i++) {                             // bola x jogador
             Actor *a = &actors[i];
+            if (!a->alive) continue;
             float d = dist(a->x, a->y, ball_x, ball_y), md = R + BALL_R;
             if (d < md && d > 0.01f) {
                 float nx = (ball_x - a->x) / d, ny = (ball_y - a->y) / d;
@@ -1380,23 +1606,25 @@ static void fute_update(struct padButtonStatus *pad, u32 btns, u32 prev) {
         }
         ball_physics(1);
     } else {                                                           // pausa: gol ou fim de jogo
-        for (int i = 0; i < FUTE_N; i++) fmove(&actors[i], 0, 0, 0);
+        for (int i = 0; i < FUTE_N; i++) if (actors[i].alive) fmove(&actors[i], 0, 0, 0);
         ball_physics(0);
         if (fute_t % 8 == 0 && goal_team >= 0)
-            spawn_part(goal_team == 0 ? FW : 0, frand(GY1, GY2), frand(-2, 2), frand(-4, -1), 40, 4,
+            spawn_part(frand(GX1, GX2), goal_team == 0 ? 0 : FH, frand(-2, 2), frand(-4, -1), 40, 4,
                        goal_team == 0 ? RGBA(70, 150, 255) : RGBA(255, 90, 100));
         if (--fute_t <= 0) {
             if (fute_finish) fute_done = 1;
             else { goal_team = -1; fute_kickoff(100); }
         }
     }
+    update_bullets();
 
     for (int i = 0; i < FUTE_N; i++) {                                 // direcao do corpo
         Actor *a = &actors[i];
+        if (!a->alive) continue;
         float spd = sqrtf(a->vx * a->vx + a->vy * a->vy);
         float target = (i != 0 || a->aiming) ? a->aim : (spd > 0.3f ? atan2f(a->vy, a->vx) : a->face);
         a->face = angle_lerp(a->face, target, 0.2f);
-        if (spd > 1.2f && (frame_count + i) % 7 == 0)
+        if (spd > 1.2f && a->invis <= 0 && (frame_count + i) % 7 == 0)
             spawn_part(a->x - a->vx * 2, a->y + 8, frand(-0.3f, 0.3f), frand(-0.3f, 0.1f), 16, 3, RGBA(196, 220, 150));
     }
     for (int i = 0; i < MAX_PART; i++) if (parts[i].active) {
@@ -1404,41 +1632,62 @@ static void fute_update(struct padButtonStatus *pad, u32 btns, u32 prev) {
         q->x += q->vx; q->y += q->vy; q->vx *= 0.93f; q->vy *= 0.93f;
         if (--q->life <= 0) q->active = 0;
     }
+    for (int i = 0; i < MAX_DMG; i++) if (dmgs[i].active) {
+        dmgs[i].y += dmgs[i].vy; dmgs[i].vy *= 0.94f;
+        if (--dmgs[i].life <= 0) dmgs[i].active = 0;
+    }
     shake *= 0.85f; if (shake < 0.2f) shake = 0;
 }
 
-static void fute_lines(float ox, float oy) {
-    u64 LC = RGBA(236, 250, 236);
-    for (int i = 0; i < 11; i++)
-        rect(ox + i * 100, oy, ox + (i + 1) * 100, oy + FH, i % 2 ? RGBA(46, 150, 74) : RGBA(40, 138, 68), 1);
-    rect(ox - 2, oy - 2, ox + FW + 2, oy + 2, LC, 3);
-    rect(ox - 2, oy + FH - 2, ox + FW + 2, oy + FH + 2, LC, 3);
-    rect(ox - 2, oy - 2, ox + 2, oy + FH + 2, LC, 3);
-    rect(ox + FW - 2, oy - 2, ox + FW + 2, oy + FH + 2, LC, 3);
-    rect(ox + FW / 2 - 2, oy, ox + FW / 2 + 2, oy + FH, LC, 3);
-    for (int k = 0; k < 36; k++) {                                     // circulo central
-        float a = 2 * PI * k / 36;
-        rect(ox + FW / 2 + cosf(a) * 80 - 2, oy + FH / 2 + sinf(a) * 80 - 2, ox + FW / 2 + cosf(a) * 80 + 2, oy + FH / 2 + sinf(a) * 80 + 2, LC, 3);
+// ---- desenho ----
+static void fute_ground(float ox, float oy) {
+    u64 line = RGBA(160, 212, 150);
+    for (int i = 0; i * 80 < (int)FH; i++) {                           // faixas do gramado
+        float y0 = oy + i * 80, y1 = oy + fminf((i + 1) * 80.0f, FH);
+        if (y1 < 0 || y0 > SCR_H) continue;
+        rect(ox, y0, ox + FW, y1, i % 2 ? RGBA(88, 178, 92) : RGBA(78, 166, 84), 1);
     }
-    fcircle(ox + FW / 2, oy + FH / 2, 5, LC, 3);
-    for (int s = 0; s < 2; s++) {                                      // grandes areas
-        float x0 = s ? FW - 150 : 0, x1 = s ? FW : 150, ex = s ? x0 : x1;
-        rect(ox + x0, oy + GY1 - 60 - 2, ox + x1, oy + GY1 - 60 + 2, LC, 3);
-        rect(ox + x0, oy + GY2 + 60 - 2, ox + x1, oy + GY2 + 60 + 2, LC, 3);
-        rect(ox + ex - 2, oy + GY1 - 60, ox + ex + 2, oy + GY2 + 60, LC, 3);
+    rect(ox - 32, oy - 90, ox - 26, oy + FH + 90, RGBA(54, 120, 66), 2);       // laterais: caminho claro + muro
+    rect(ox - 26, oy - 90, ox, oy + FH + 90, RGBA(150, 196, 150), 2);
+    rect(ox + FW, oy - 90, ox + FW + 26, oy + FH + 90, RGBA(150, 196, 150), 2);
+    rect(ox + FW + 26, oy - 90, ox + FW + 32, oy + FH + 90, RGBA(54, 120, 66), 2);
+    for (int k = 0; k < 60; k++) {                                     // flores e arbustos fora do campo
+        float wy = fmodf(k * 131.0f, FH + 160.0f) - 80.0f;
+        float lx = ox - 50 - (k * 37 % 40), rx = ox + FW + 40 + (k * 53 % 40);
+        float sy = wy + oy;
+        if (sy < -10 || sy > SCR_H + 10) continue;
+        fcircle(k % 2 ? lx : rx, sy, 9, RGBA(44, 150, 76), 2);
+        rect(k % 2 ? lx - 2 : rx - 2, sy - 2, k % 2 ? lx + 2 : rx + 2, sy + 2, k % 3 ? RGBA(255, 140, 170) : RGBA(255, 240, 120), 3);
     }
-    for (int s = 0; s < 2; s++) {                                      // gols
-        float gx = s ? FW : 0, d = s ? GOAL_D : -GOAL_D;
-        u64 tc = s ? RGBA(255, 90, 100) : RGBA(70, 150, 255);
-        float xa = ox + (d < 0 ? gx + d : gx), xb = ox + (d < 0 ? gx : gx + d);
-        rect(xa, oy + GY1, xb, oy + GY2, RGBA(58, 74, 86), 3);
-        for (float x = xa; x < xb; x += 14) rect(x, oy + GY1, x + 2, oy + GY2, RGBA(150, 168, 180), 4);
-        for (float y = oy + GY1; y < oy + GY2; y += 14) rect(xa, y, xb, y + 2, RGBA(150, 168, 180), 4);
-        rect(xa - 3, oy + GY1 - 4, xb + 3, oy + GY1 + 3, tc, 5);
-        rect(xa - 3, oy + GY2 - 3, xb + 3, oy + GY2 + 4, tc, 5);
-        rect(s ? xb - 3 : xa - 3, oy + GY1 - 4, s ? xb + 3 : xa + 3, oy + GY2 + 4, tc, 5);
-        fcircle(ox + gx, oy + GY1, 5, RGBA(255, 255, 255), 6);
-        fcircle(ox + gx, oy + GY2, 5, RGBA(255, 255, 255), 6);
+    rect(ox, oy + FH / 2 - 4, ox + FW, oy + FH / 2 + 4, line, 3);              // meio de campo
+    for (int k = 0; k < 40; k++) {
+        float a = 2 * PI * k / 40;
+        rect(ox + FW / 2 + cosf(a) * 75 - 2, oy + FH / 2 + sinf(a) * 75 - 2, ox + FW / 2 + cosf(a) * 75 + 2, oy + FH / 2 + sinf(a) * 75 + 2, line, 3);
+    }
+    for (int s = 0; s < 2; s++) {                                      // grandes areas e gols
+        float gy = s ? FH : 0, d = s ? GOAL_D : -GOAL_D, ay = s ? FH - 170 : 170;
+        u64 tc = s ? RGBA(70, 150, 255) : RGBA(255, 90, 100);          // embaixo = azul, em cima = vermelho
+        rect(ox + GX1 - 50, oy + ay - 2, ox + GX2 + 50, oy + ay + 2, line, 3);
+        rect(ox + GX1 - 52, oy + (s ? ay : gy), ox + GX1 - 48, oy + (s ? gy : ay), line, 3);
+        rect(ox + GX2 + 48, oy + (s ? ay : gy), ox + GX2 + 52, oy + (s ? gy : ay), line, 3);
+        float ya = oy + (d < 0 ? gy + d : gy), yb = oy + (d < 0 ? gy : gy + d);
+        rect(ox + GX1, ya, ox + GX2, yb, RGBA(58, 74, 86), 3);
+        for (float x = ox + GX1; x < ox + GX2; x += 14) rect(x, ya, x + 2, yb, RGBA(150, 168, 180), 4);
+        for (float y = ya; y < yb; y += 14) rect(ox + GX1, y, ox + GX2, y + 2, RGBA(150, 168, 180), 4);
+        rect(ox + GX1 - 4, ya - 3, ox + GX1 + 3, yb + 3, tc, 5);
+        rect(ox + GX2 - 3, ya - 3, ox + GX2 + 4, yb + 3, tc, 5);
+        rect(ox + GX1 - 4, s ? yb - 3 : ya - 3, ox + GX2 + 4, s ? yb + 4 : ya + 3, tc, 5);
+        fcircle(ox + GX1, oy + gy, 5, RGBA(255, 255, 255), 6);
+        fcircle(ox + GX2, oy + gy, 5, RGBA(255, 255, 255), 6);
+    }
+}
+
+static void draw_ball_icon(float cx, float cy, float r, int z) {
+    fcircle(cx, cy, r + 1.5f, RGBA(20, 18, 44), z);
+    fcircle(cx, cy, r, RGBA(255, 255, 255), z + 1);
+    for (int k = 0; k < 3; k++) {
+        float a = k * 2 * PI / 3 + 0.5f;
+        fcircle(cx + cosf(a) * r * 0.5f, cy + sinf(a) * r * 0.5f, r * 0.3f, RGBA(40, 40, 60), z + 2);
     }
 }
 
@@ -1447,21 +1696,36 @@ static void fute_hud(void) {
     Actor *p = &actors[0];
     tz = 49;
     int secs = (fute_time + 59) / 60;
-    rect(228, 4, 412, 46, RGBA(10, 8, 30), 38);
-    rect(230, 6, 410, 44, RGBA(26, 24, 70), 39);
-    rect(234, 9, 282, 41, RGBA(46, 120, 240), 40);
-    rect(358, 9, 406, 41, RGBA(235, 60, 80), 40);
-    snprintf(buf, sizeof(buf), "%d", score[0]); text_sh(258 - text_w(buf, 3) / 2, 15, 3, RGBA(255, 255, 255), buf);
-    snprintf(buf, sizeof(buf), "%d", score[1]); text_sh(382 - text_w(buf, 3) / 2, 15, 3, RGBA(255, 255, 255), buf);
-    if (fute_golden) text_sh(320 - text_w("OURO", 2) / 2, 18, 2, GOLD, "OURO");
-    else { snprintf(buf, sizeof(buf), "%d:%02d", secs / 60, secs % 60); text_sh(320 - text_w(buf, 2) / 2, 18, 2, RGBA(255, 255, 255), buf); }
+    rect(0, 0, 114, 34, RGBA(10, 8, 30), 38);                          // placar azul (canto esquerdo)
+    rect(0, 0, 114, 30, RGBA(40, 84, 214), 39);
+    gsKit_prim_triangle(gs, 114, 0, 130, 0, 114, 30, 39, RGBA(40, 84, 214));
+    draw_ball_icon(24, 15, 11, 40);
+    snprintf(buf, sizeof(buf), "%d", score[0]); text_sh(66, 6, 3, RGBA(255, 255, 255), buf);
+    rect(SCR_W - 114, 0, SCR_W, 34, RGBA(10, 8, 30), 38);              // placar vermelho (canto direito)
+    rect(SCR_W - 114, 0, SCR_W, 30, RGBA(226, 52, 72), 39);
+    gsKit_prim_triangle(gs, SCR_W - 114, 0, SCR_W - 130, 0, SCR_W - 114, 30, 39, RGBA(226, 52, 72));
+    draw_ball_icon(SCR_W - 24, 15, 11, 40);
+    snprintf(buf, sizeof(buf), "%d", score[1]); text_sh(SCR_W - 66 - text_w(buf, 3), 6, 3, RGBA(255, 255, 255), buf);
+    rect(272, 0, 368, 30, RGBA(10, 8, 30), 38);                        // cronometro
+    rect(274, 0, 366, 28, RGBA(26, 24, 70), 39);
+    if (fute_golden) text_sh(320 - text_w("OURO", 2) / 2, 7, 2, GOLD, "OURO");
+    else { snprintf(buf, sizeof(buf), "%d:%02d", secs / 60, secs % 60); text_sh(320 - text_w(buf, 2) / 2, 7, 2, RGBA(255, 255, 255), buf); }
 
-    float bx = SCR_W - 62, by = SCR_H - 66;                            // botao de disparada
-    int ready = p->super <= 0;
-    fcircle(bx, by, 31, RGBA(10, 8, 30), 38);
-    fcircle(bx, by, 28, ready ? ((anim / 10) % 2 ? RGBA(255, 232, 80) : RGBA(255, 190, 40)) : RGBA(40, 60, 140), 39);
-    text_sh((int)(bx - text_w("L1", 2) / 2.0f), (int)by - 7, 2, ready ? GOLD_INK : RGBA(200, 225, 255), "L1");
-    if (!ready) bar((int)bx - 20, (int)by + 12, 40, 5, 1.0f - p->super / (float)DASH_CD, RGBA(120, 190, 255), RGBA(200, 235, 255), 40);
+    float bx = SCR_W - 52, by = SCR_H - 52;                            // botao de super (L1)
+    int ready = p->super >= 100;
+    fcircle(bx, by, 27, RGBA(10, 8, 30), 38);
+    fcircle(bx, by, 24, ready ? ((anim / 10) % 2 ? RGBA(255, 232, 80) : RGBA(255, 190, 40)) : RGBA(36, 70, 170), 39);
+    draw_skull(bx, by - 2, 11, ready ? GOLD_INK : RGBA(255, 255, 255), 40);
+    for (int k = 0; k < 20; k++) {                                     // anel de carga
+        float a = -PI / 2 + 2 * PI * k / 20;
+        fcircle(bx + cosf(a) * 31, by + sinf(a) * 31, 2.2f, k < (int)(p->super / 5.0f) ? RGBA(255, 220, 60) : RGBA(30, 30, 70), 41);
+    }
+    text_sh((int)bx - text_w("L1", 1) / 2, (int)by + 14, 1, RGBA(255, 255, 255), "L1");
+    float kx = bx - 68, ky = by + 8;                                   // botao de chute (R2)
+    fcircle(kx, ky, 20, RGBA(10, 8, 30), 38);
+    fcircle(kx, ky, 17, p->cd > 0 ? RGBA(60, 90, 70) : RGBA(70, 190, 100), 39);
+    draw_ball_icon(kx, ky - 3, 8, 40);
+    text_sh((int)kx - text_w("R2", 1) / 2, (int)ky + 8, 1, RGBA(255, 255, 255), "R2");
 
     if (fute_phase == 0) {
         if (fute_t < 20) ctext(120, 8, GOLD, "JA!");
@@ -1472,19 +1736,25 @@ static void fute_hud(void) {
             ctext(132, 3, goal_team == 0 ? RGBA(120, 180, 255) : RGBA(255, 130, 140), goal_team == 0 ? "TIME AZUL MARCOU!" : "TIME VERMELHO MARCOU!");
         } else ctext(70, 6, GOLD, "FIM DE JOGO!");
     } else if (golden_msg > 0) ctext(70, 5, GOLD, "GOL DE OURO!");
-    if (frame_count < 420 && fute_phase != 2) ctext(396, 2, RGBA(255, 232, 120), "DIR: MIRAR  R1: CHUTE  L1: DISPARADA");
+    if (!p->alive && fute_phase != 2) {
+        snprintf(buf, sizeof(buf), "REAPARECE EM %d", p->strafe_t / 60 + 1);
+        ctext(190, 3, RGBA(255, 255, 255), buf);
+    }
+    if (frame_count < 480 && fute_phase != 2) text_sh(14, 424, 2, RGBA(255, 232, 120), "R1 ATIRA  R2 CHUTA  L1 SUPER");
     tz = 60;
 }
 
 static void fute_render(void) {
     Actor *p = &actors[0];
-    cam_x += (ball_x * 0.5f + p->x * 0.5f - cam_x) * 0.1f;
-    cam_y += (ball_y * 0.5f + p->y * 0.5f - cam_y) * 0.1f;
-    float cx = clampf(cam_x, SCR_W / 2 - 70.0f, FW + 70.0f - SCR_W / 2), cy = clampf(cam_y, SCR_H / 2 - 40.0f, FH + 40.0f - SCR_H / 2);
+    float fx = p->alive ? p->x : ball_x, fy = p->alive ? p->y : ball_y;
+    cam_x += (ball_x * 0.35f + fx * 0.65f - cam_x) * 0.1f;
+    cam_y += (ball_y * 0.35f + fy * 0.65f - cam_y) * 0.1f;
+    float cx = clampf(cam_x, SCR_W / 2 - 60.0f, FW + 60.0f - SCR_W / 2), cy = clampf(cam_y, SCR_H / 2 - 80.0f, FH + 80.0f - SCR_H / 2);
     float ox = SCR_W / 2 - cx + (shake > 0.3f ? frand(-shake, shake) : 0);
     float oy = SCR_H / 2 - cy + (shake > 0.3f ? frand(-shake, shake) : 0);
-    gsKit_clear(gs, RGBA(20, 84, 46));
-    fute_lines(ox, oy);
+    gsKit_clear(gs, RGBA(30, 112, 62));
+    fute_ground(ox, oy);
+    draw_blocks(ox, oy);
 
     float bx = ball_x + ox, by = ball_y + oy;                          // bola
     fellipse(bx, by + 6, 8, 3, RGBA(20, 70, 36), 10);
@@ -1494,31 +1764,44 @@ static void fute_render(void) {
         float a = ball_rot + k * 2 * PI / 3;
         fcircle(bx + cosf(a) * 4.5f, by + sinf(a) * 4.5f, 2.6f, RGBA(40, 40, 60), 21);
     }
+    draw_bullets(ox, oy);
 
-    int tz_old = tz; tz = 36;
     for (int i = 0; i < FUTE_N; i++) {                                 // jogadores
         const Actor *a = &actors[i];
+        if (!a->alive || !visible_to(a, i, p)) continue;
         float sx = a->x + ox, sy = a->y + oy, spd = sqrtf(a->vx * a->vx + a->vy * a->vy);
         u64 tc = a->team == 0 ? RGBA(70, 150, 255) : RGBA(255, 90, 100);
-        fellipse(sx, sy + 16, 19, 8, tc, 12);
-        no_gun = 1;
-        draw_human(sx, sy, a->cls, a->face, a->aim, frame_count * 0.45f + i * 1.7f, spd > 0.6f, 0, a->recoil, i == 0);
-        no_gun = 0;
-        text_sh((int)(sx - text_w(names[i], 1) / 2.0f), (int)sy - 38, 1, i == 0 ? RGBA(255, 255, 255) : tc, names[i]);
-        if (i == 0) {                                                  // seta sobre o jogador
-            int ay = (int)sy - 50 + (int)(sinf(anim * 0.2f) * 2);
-            gsKit_prim_triangle(gs, sx - 5, ay, sx + 5, ay, sx, ay + 7, 36, RGBA(255, 255, 255));
-        }
+        fellipse(sx, sy + 16, i == 0 ? 21 : 18, i == 0 ? 9 : 8, i == 0 ? RGBA(120, 255, 150) : tc, 12);
+        int look = a->flash > 0 ? 1 : 0;
+        if (!look && a->invis > 0 && !(a->invis < 120 && (anim / 6) % 2)) look = 2;
+        draw_human(sx, sy, a->cls, a->face, a->aim, frame_count * 0.45f + i * 1.7f, spd > 0.6f, look, a->recoil, i == 0);
     }
-    tz = tz_old;
+    draw_bushes(ox, oy);
+    if (p->alive && in_bush(p->x, p->y)) fcircle(p->x + ox, p->y + oy, 6, RGBA(53, 201, 245), 27);
+    for (int i = 0; i < FUTE_N; i++) {
+        const Actor *a = &actors[i];
+        if (a->alive && visible_to(a, i, p)) draw_overhead(a, i, a->x + ox, a->y + oy);
+    }
     for (int i = 0; i < MAX_PART; i++) if (parts[i].active) {
         const Particle *q = &parts[i];
         float s = q->size * (q->life / q->max) + 0.6f;
         rect(q->x + ox - s, q->y + oy - s, q->x + ox + s, q->y + oy + s, q->color, 28);
     }
-    if (p->aiming && fute_phase == 1)                                  // linha de mira do chute
-        for (float d = 26; d < 110; d += 18)
-            fcircle(p->x + ox + cosf(p->aim) * d, p->y + oy + sinf(p->aim) * d, 2.4f - d / 60.0f + 1.0f, RGBA(255, 255, 255), 29);
+    for (int i = 0; i < MAX_DMG; i++) if (dmgs[i].active) {
+        char b[8];
+        snprintf(b, sizeof(b), "%d", dmgs[i].val);
+        text_sh((int)(dmgs[i].x + ox) - text_w(b, 2) / 2, (int)(dmgs[i].y + oy), 2, dmgs[i].color, b);
+    }
+    if (p->alive && p->aiming && fute_phase == 1) {                    // linha de mira
+        const ClassDef *c = &CLS[p->cls];
+        float len = c->lob ? p->aimd : c->bspeed * c->life, rr = c->lob ? 55.0f : 9.0f;
+        for (float d = 28; d < len; d += 24)
+            fcircle(p->x + ox + cosf(p->aim) * d, p->y + oy + sinf(p->aim) * d, 2.5f - d / len, RGBA(255, 255, 255), 29);
+        for (int k = 0; k < 16; k++) {
+            float a = 2 * PI * k / 16 + anim * 0.05f;
+            fcircle(p->x + ox + cosf(p->aim) * len + cosf(a) * rr, p->y + oy + sinf(p->aim) * len + sinf(a) * rr, 2, ccol(p->cls, 40), 29);
+        }
+    }
     fute_hud();
 }
 
@@ -1836,7 +2119,7 @@ static void render_tab_help(void) {
     static const char *descs[5] = { "MOVER COM INERCIA", "MIRAR. SOLTAR NAO ATIRA", "ATIRAR. SEGURE REPETE",
                                     "SUPER QUANDO AMARELO", "PAUSA" };
     static const char *tips[5]  = { "QUEBRE CAIXAS: CUBOS DE PODER", "ARBUSTOS ESCONDEM VOCE", "AGUA BLOQUEIA O PASSO",
-                                    "FUJA DO GAS E VIRE O REI!", "FUTE: R1 CHUTA. L1 DISPARA. 2 GOLS!" };
+                                    "FUJA DO GAS E VIRE O REI!", "FUTE: R1 ATIRA, R2 CHUTA, 2 GOLS!" };
     panel(40, 56, 600, 398, NAVY_EDGE, NAVY_FILL, 7);
     text_sh(64, 66, 2, GOLD, "CONTROLES");
     rect(64, 84, 576, 86, NAVY_EDGE, 9);
